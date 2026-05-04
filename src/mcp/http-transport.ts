@@ -206,8 +206,10 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       .catch(() => { /* best-effort */ });
   }
 
+  const hostname = process.env.GBRAIN_HTTP_HOST;
   const server = Bun.serve({
     port,
+    ...(hostname ? { hostname } : {}),
     async fetch(req, server) {
       const startedMs = Date.now();
       const url = new URL(req.url);
