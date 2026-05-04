@@ -1792,28 +1792,31 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // ---------------------------------------------------------------------------
   const clientCount = await sql`SELECT count(*)::int as count FROM oauth_clients`;
 
+  const bindLabel = bind;
+  const adminTokenBlock = (suppressBootstrapPrint || process.env.GBRAIN_SUPPRESS_ADMIN_TOKEN_LOG === '1')
+    ? '║  Admin Token: suppressed                              ║'
+    : bootstrapFromEnv
+      ? '║  Admin Token: from $GBRAIN_ADMIN_BOOTSTRAP_TOKEN     ║'
+      : `║  Admin Token (paste into /admin login):              ║\n║  ${bootstrapToken.substring(0, 50)}  ║\n║  ${bootstrapToken.substring(50).padEnd(50)}  ║`;
   app.listen(port, bind, () => {
     console.error(`
 ╔══════════════════════════════════════════════════════╗
 ║  GBrain MCP Server v${VERSION.padEnd(37)}║
 ╠══════════════════════════════════════════════════════╣
 ║  Port:      ${String(port).padEnd(40)}║
-║  Bind:      ${bind.padEnd(40)}║
+║  Bind:      ${bindLabel.padEnd(40)}║
 ║  Engine:    ${(config.engine || 'pglite').padEnd(40)}║
 ║  Issuer:    ${issuerUrl.origin.padEnd(40)}║
 ║  Clients:   ${String((clientCount[0] as any).count).padEnd(40)}║
 ║  DCR:       ${(enableDcr ? 'enabled' : 'disabled').padEnd(40)}║
 ║  Token TTL: ${(tokenTtl + 's').padEnd(40)}║
 ╠══════════════════════════════════════════════════════╣
-║  Admin:     http://localhost:${port}/admin${' '.repeat(Math.max(0, 19 - String(port).length))}║
-║  MCP:       http://localhost:${port}/mcp${' '.repeat(Math.max(0, 21 - String(port).length))}║
-║  Health:    http://localhost:${port}/health${' '.repeat(Math.max(0, 18 - String(port).length))}║
+║  Admin:     http://${bindLabel}:${port}/admin${' '.repeat(Math.max(0, 19 - String(port).length - bindLabel.length + 9))}║
+║  MCP:       http://${bindLabel}:${port}/mcp${' '.repeat(Math.max(0, 21 - String(port).length - bindLabel.length + 9))}║
+║  Health:    http://${bindLabel}:${port}/health${' '.repeat(Math.max(0, 18 - String(port).length - bindLabel.length + 9))}║
 ╠══════════════════════════════════════════════════════╣
-${suppressBootstrapPrint
-  ? '║  Admin Token: suppressed (--suppress-bootstrap-token) ║\n╚══════════════════════════════════════════════════════╝'
-  : bootstrapFromEnv
-    ? '║  Admin Token: from $GBRAIN_ADMIN_BOOTSTRAP_TOKEN     ║\n╚══════════════════════════════════════════════════════╝'
-    : `║  Admin Token (paste into /admin login):              ║\n║  ${bootstrapToken.substring(0, 50)}  ║\n║  ${bootstrapToken.substring(50).padEnd(50)}  ║\n╚══════════════════════════════════════════════════════╝`}
+${adminTokenBlock}
+╚══════════════════════════════════════════════════════╝
 `);
   });
 }
