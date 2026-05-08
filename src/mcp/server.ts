@@ -8,6 +8,23 @@ import { buildToolDefs } from './tool-defs.ts';
 import { dispatchToolCall, validateParams, buildOperationContext } from './dispatch.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 
+export function resolveStdioTakesHoldersAllowList(env = process.env): string[] | undefined {
+  const raw = env.GBRAIN_MCP_STDIO_TAKES_HOLDERS?.trim();
+  if (!raw) return ['world'];
+
+  const normalized = raw.toLowerCase();
+  if (normalized === '*' || normalized === 'all' || normalized === 'none' || normalized === 'unrestricted') {
+    return undefined;
+  }
+
+  const holders = raw
+    .split(',')
+    .map(holder => holder.trim())
+    .filter(Boolean);
+
+  return holders.length > 0 ? holders : ['world'];
+}
+
 export async function startMcpServer(engine: BrainEngine) {
   const server = new Server(
     { name: 'gbrain', version: VERSION },
@@ -30,12 +47,14 @@ export async function startMcpServer(engine: BrainEngine) {
     const { name, arguments: params } = request.params;
     // v0.28: stdio MCP has no per-token auth (local pipe). Default the
     // takes-holder allow-list to ['world'] so agent-facing callers don't
-    // see private hunches via takes_list / takes_search / query. Operators
-    // who want stdio to see everything should call ops directly via
-    // `gbrain call <op>` (sets remote=false in src/cli.ts).
+    // see private hunches via takes_list / takes_search / query.
+    //
+    // v0.30.0: trusted local deployments can opt into CLI parity with
+    // GBRAIN_MCP_STDIO_TAKES_HOLDERS=all, or provide a comma-separated holder
+    // allow-list. Unset/blank stays fail-closed at ['world'].
     return dispatchToolCall(engine, name, params, {
       remote: true,
-      takesHoldersAllowList: ['world'],
+      takesHoldersAllowList: resolveStdioTakesHoldersAllowList(),
       // v0.31: source defaults to 'default' for stdio (no per-token scope).
       // Operators who want a different source on stdio MCP should set
       // GBRAIN_SOURCE in the env or use --source via `gbrain call`.
