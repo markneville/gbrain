@@ -249,15 +249,14 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
     }
   });
 
-  test('client without admin scope cannot call run_doctor', async () => {
-    // Register a separate client with read+write only (no admin) and verify
-    // that gbrain remote doctor surfaces an auth-error message. This is the
-    // codex review #7 regression guard — the verification flow MUST require
-    // admin scope.
+  test('read-only client can call remote doctor diagnostics', async () => {
+    // Register a separate read-only client and verify the remote doctor path
+    // works without enabling write/admin scope. Diagnostics are read-only and
+    // the HTTP MCP identity proof must not require mutation-capable credentials.
     const reg = await spawn([
-      'auth', 'register-client', 'thin-client-readwrite',
+      'auth', 'register-client', 'thin-client-readonly',
       '--grant-types', 'client_credentials',
-      '--scopes', 'read write',
+      '--scopes', 'read',
     ], hostHome);
     if (reg.exitCode !== 0) throw new Error(`register-client failed: ${reg.stderr || reg.stdout}`);
     const parsed = parseRegisterClientOutput(reg.stdout);
@@ -280,12 +279,10 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
       expect(init.exitCode).toBe(0);
 
       const r = await spawn(['remote', 'doctor', '--json'], lowScopeHome);
-      expect(r.exitCode).toBe(1);
-      const err = JSON.parse(r.stdout.trim());
-      expect(err.status).toBe('error');
-      // Either the SDK 401 path or our auth_after_refresh wrap is fine —
-      // the test pins "this fails because admin scope is missing".
-      expect(['auth', 'auth_after_refresh', 'tool_error']).toContain(err.reason);
+      expect(r.exitCode).toBe(0);
+      const report = JSON.parse(r.stdout.trim());
+      expect(['ok', 'healthy', 'warnings']).toContain(report.status);
+      expect(typeof report.summary?.health_score === 'number' || typeof report.health_score === 'number').toBe(true);
     } finally {
       rmSync(lowScopeHome, { recursive: true, force: true });
     }

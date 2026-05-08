@@ -232,6 +232,10 @@ export interface AuthInfo {
    * on every request — see PR #586 review note D14=B).
    */
   clientName?: string;
+  /** Optional belief/takes holder identity bound to the remote client. */
+  holder?: string;
+  /** Server-side allow-list for takes.holder, threaded from the transport. */
+  takesHoldersAllowList?: string[];
   scopes: string[];
   expiresAt?: number;
   /**
@@ -1668,7 +1672,8 @@ const get_stats: Operation = {
   handler: async (ctx) => {
     return ctx.engine.getStats();
   },
-  scope: 'admin',
+  // Read-only diagnostic. Thin-client identity proof must not require admin/write.
+  scope: 'read',
   cliHints: { name: 'stats' },
 };
 
@@ -1726,7 +1731,8 @@ const get_brain_identity: Operation = {
  *
  * scope=admin because some checks expose system-state (queue depth, schema
  * version) that read-only consumers don't need. localOnly=false so HTTP
- * callers can invoke it. No mutation; safe to call repeatedly.
+ * safe to call repeatedly. Scope is read: thin-client identity proof should not
+ * require admin/write credentials for diagnostics.
  *
  * Precedent: doctor only. Generalizing to lint/integrity/orphans is filed as
  * follow-up work pending demand.
@@ -1739,7 +1745,7 @@ const run_doctor: Operation = {
     const { doctorReportRemote } = await import('../commands/doctor.ts');
     return doctorReportRemote(ctx.engine);
   },
-  scope: 'admin',
+  scope: 'read',
   localOnly: false,
 };
 
@@ -2569,8 +2575,8 @@ const whoami: Operation = {
   name: 'whoami',
   description:
     'Introspect the calling identity. Returns one of three transport shapes: ' +
-    '{transport: "oauth", client_id, client_name, scopes, expires_at}, ' +
-    '{transport: "legacy", token_name, scopes, expires_at: null}, or ' +
+    '{transport: "oauth", client_id, client_name, holder, takes_holders, scopes, expires_at}, ' +
+    '{transport: "legacy", token_name, holder, takes_holders, scopes, expires_at: null}, or ' +
     '{transport: "local", scopes: []}. Throws unknown_transport when the ' +
     'context is ambiguous (remote=true without auth) — fail-closed posture ' +
     'mirroring the v0.26.9 trust-boundary contract.',
@@ -2602,6 +2608,8 @@ const whoami: Operation = {
         transport: 'oauth',
         client_id: ctx.auth.clientId,
         client_name: ctx.auth.clientName ?? ctx.auth.clientId,
+        holder: ctx.auth.holder ?? null,
+        takes_holders: ctx.auth.takesHoldersAllowList ?? ctx.takesHoldersAllowList ?? ['world'],
         scopes: ctx.auth.scopes,
         expires_at: ctx.auth.expiresAt ?? null,
       };
@@ -2609,6 +2617,8 @@ const whoami: Operation = {
     return {
       transport: 'legacy',
       token_name: ctx.auth.clientName ?? ctx.auth.clientId,
+      holder: ctx.auth.holder ?? null,
+      takes_holders: ctx.auth.takesHoldersAllowList ?? ctx.takesHoldersAllowList ?? ['world'],
       scopes: ctx.auth.scopes,
       expires_at: null,
     };

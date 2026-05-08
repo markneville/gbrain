@@ -330,13 +330,15 @@ async function revokeClient(clientId: string) {
 
 async function registerClient(name: string, args: string[]) {
   if (!name) {
-    console.error('Usage: auth register-client <name> [--grant-types G] [--scopes S] [--source SOURCE] [--federated-read SRC1,SRC2,...]');
+    console.error('Usage: auth register-client <name> [--grant-types G] [--scopes S] [--source SOURCE] [--federated-read SRC1,SRC2,...] [--holder H] [--takes-holders H1,H2]');
     process.exit(1);
   }
   const grantsIdx = args.indexOf('--grant-types');
   const scopesIdx = args.indexOf('--scopes');
   const sourceIdx = args.indexOf('--source');
   const federatedIdx = args.indexOf('--federated-read');
+  const holderIdx = args.indexOf('--holder');
+  const takesIdx = args.indexOf('--takes-holders');
   const grantTypes = grantsIdx >= 0 && args[grantsIdx + 1]
     ? args[grantsIdx + 1].split(',').map(s => s.trim()).filter(Boolean)
     : ['client_credentials'];
@@ -351,13 +353,17 @@ async function registerClient(name: string, args: string[]) {
   const federatedRead = federatedIdx >= 0 && args[federatedIdx + 1]
     ? args[federatedIdx + 1].split(',').map(s => s.trim()).filter(Boolean)
     : undefined;
+  const holder = holderIdx >= 0 && args[holderIdx + 1] ? args[holderIdx + 1].trim() : undefined;
+  const takesHolders = takesIdx >= 0 && args[takesIdx + 1]
+    ? args[takesIdx + 1].split(',').map(s => s.trim()).filter(Boolean)
+    : ['world'];
 
   try {
     await withConfiguredSql(async (sql) => {
       const { GBrainOAuthProvider } = await import('../core/oauth-provider.ts');
       const provider = new GBrainOAuthProvider({ sql });
       const { clientId, clientSecret } = await provider.registerClientManual(
-        name, grantTypes, scopes, [], sourceId, federatedRead,
+        name, grantTypes, scopes, [], sourceId, federatedRead, { holder, takesHolders },
       );
       const effectiveFederated = federatedRead && federatedRead.length > 0 ? federatedRead : [sourceId];
       console.log(`OAuth client registered: "${name}"\n`);
@@ -366,7 +372,9 @@ async function registerClient(name: string, args: string[]) {
       console.log(`  Grant types:      ${grantTypes.join(', ')}`);
       console.log(`  Scopes:           ${scopes}`);
       console.log(`  Write source:     ${sourceId}`);
-      console.log(`  Federated reads:  ${effectiveFederated.join(', ')}\n`);
+      console.log(`  Federated reads:  ${effectiveFederated.join(', ')}`);
+      console.log(`  Holder:           ${holder || '(none)'}`);
+      console.log(`  Takes:            ${takesHolders.join(', ')}\n`);
       console.log('Save the client secret — it will not be shown again.');
       console.log(`Revoke with: gbrain auth revoke-client "${clientId}"`);
     });

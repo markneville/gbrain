@@ -199,6 +199,20 @@ describe('verifyAccessToken', () => {
     expect(authInfo.clientId).toBe(clientId);
     expect(authInfo.scopes).toContain('read');
     expect(authInfo.token).toBe(tokens.access_token);
+    expect((authInfo as any).takesHoldersAllowList).toEqual(['world']);
+  });
+
+  test('OAuth client permissions thread holder and takes visibility into auth info', async () => {
+    const { clientId, clientSecret } = await provider.registerClientManual(
+      'mackie-test', ['client_credentials'], 'read write', [],
+      { holder: 'mackie', takesHolders: ['world', 'mackie'] },
+    );
+    const tokens = await provider.exchangeClientCredentials(clientId, clientSecret, 'read');
+    const authInfo = await provider.verifyAccessToken(tokens.access_token) as any;
+
+    expect(authInfo.clientId).toBe(clientId);
+    expect(authInfo.holder).toBe('mackie');
+    expect(authInfo.takesHoldersAllowList).toEqual(['world', 'mackie']);
   });
 
   test('expired token is rejected', async () => {
@@ -272,6 +286,7 @@ describe('verifyAccessToken', () => {
     const authInfo = await provider.verifyAccessToken(legacyToken);
     expect(authInfo.clientId).toBe('legacy-agent');
     expect(authInfo.scopes).toEqual(['read', 'write', 'admin']); // grandfathered full access
+    expect((authInfo as any).takesHoldersAllowList).toEqual(['world']);
   });
 });
 
@@ -566,6 +581,66 @@ describe('sweepExpiredTokens', () => {
 // ---------------------------------------------------------------------------
 // Scope Annotations
 // ---------------------------------------------------------------------------
+
+describe('whoami identity surface', () => {
+  test('OAuth whoami reports holder and server-side takes holder allow-list', async () => {
+    const { operationsByName } = require('../src/core/operations.ts');
+    const result = await operationsByName.whoami.handler({
+      engine: {} as any,
+      config: { engine: 'pglite' } as any,
+      logger: console,
+      dryRun: false,
+      remote: true,
+      auth: {
+        token: 'redacted',
+        clientId: 'gbrain_cl_test',
+        clientName: 'mackie-test',
+        holder: 'mackie',
+        takesHoldersAllowList: ['world', 'mackie'],
+        scopes: ['read'],
+        expiresAt: 12345,
+      },
+      takesHoldersAllowList: ['world', 'mackie'],
+    }, {});
+
+    expect(result).toEqual({
+      transport: 'oauth',
+      client_id: 'gbrain_cl_test',
+      client_name: 'mackie-test',
+      holder: 'mackie',
+      takes_holders: ['world', 'mackie'],
+      scopes: ['read'],
+      expires_at: 12345,
+    });
+  });
+
+  test('legacy whoami stays backward-compatible while failing closed to world takes', async () => {
+    const { operationsByName } = require('../src/core/operations.ts');
+    const result = await operationsByName.whoami.handler({
+      engine: {} as any,
+      config: { engine: 'pglite' } as any,
+      logger: console,
+      dryRun: false,
+      remote: true,
+      auth: {
+        token: 'redacted',
+        clientId: 'legacy-agent',
+        clientName: 'legacy-agent',
+        scopes: ['read', 'write', 'admin'],
+      },
+      takesHoldersAllowList: ['world'],
+    }, {});
+
+    expect(result).toEqual({
+      transport: 'legacy',
+      token_name: 'legacy-agent',
+      holder: null,
+      takes_holders: ['world'],
+      scopes: ['read', 'write', 'admin'],
+      expires_at: null,
+    });
+  });
+});
 
 describe('operation scope annotations', () => {
   test('all operations have a scope', () => {
