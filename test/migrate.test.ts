@@ -1541,6 +1541,54 @@ describe('migration v51 — facts_fence_columns (v0.32.2)', () => {
 // statement_timeout + idle_in_transaction_session_timeout delivered as
 // startup parameters kill those backends on the server side.
 
+describe('migration v44 — oauth_client_permissions', () => {
+  test('exists with expected name and idempotent ALTER', () => {
+    const v44 = MIGRATIONS.find(m => m.version === 44);
+    expect(v44).toBeDefined();
+    expect(v44?.name).toBe('oauth_client_permissions');
+    expect(v44?.sql).toContain('ALTER TABLE oauth_clients');
+    expect(v44?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
+  });
+
+  test('fresh Postgres/PGLite schemas include OAuth and legacy token permissions defaults', async () => {
+    const { SCHEMA_SQL } = await import('../src/core/schema-embedded.ts');
+    const { PGLITE_SCHEMA_SQL } = await import('../src/core/pglite-schema.ts');
+    for (const sql of [SCHEMA_SQL, PGLITE_SCHEMA_SQL]) {
+      expect(sql).toContain('permissions  JSONB NOT NULL DEFAULT');
+      expect(sql).toContain('permissions             JSONB DEFAULT');
+      expect(sql).toContain('"takes_holders":["world"]');
+    }
+  });
+
+  test('LATEST_VERSION caught up to 44', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(44);
+  });
+});
+
+describe('migration v45 — legacy_access_token_permissions', () => {
+  test('exists with expected name and idempotent ALTER', () => {
+    const v45 = MIGRATIONS.find(m => m.version === 45);
+    expect(v45).toBeDefined();
+    expect(v45?.name).toBe('legacy_access_token_permissions');
+    expect(v45?.sql).toContain('ALTER TABLE access_tokens');
+    expect(v45?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
+  });
+
+  test('LATEST_VERSION caught up to 45', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(45);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
+// PR #363 regression guards — session timeouts via startup parameters
+// resolveSessionTimeouts — GBRAIN_*_TIMEOUT env overrides
+// ─────────────────────────────────────────────────────────────────
+//
+// Guards: orphan pgbouncer backends that hold table locks for hours when
+// the postgres.js client disconnects mid-transaction. Session-level
+// statement_timeout + idle_in_transaction_session_timeout delivered as
+// startup parameters kill those backends on the server side.
+
 describe('resolveSessionTimeouts — env var overrides', () => {
   const { resolveSessionTimeouts } = require('../src/core/db.ts');
   const origStatement = process.env.GBRAIN_STATEMENT_TIMEOUT;

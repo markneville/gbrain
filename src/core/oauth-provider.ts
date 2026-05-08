@@ -106,6 +106,27 @@ export function coerceTimestamp(value: unknown): number | undefined {
   return n;
 }
 
+
+interface ClientPermissions {
+  holder?: string;
+  takes_holders: string[];
+}
+
+function parseClientPermissions(value: unknown): ClientPermissions {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { raw = undefined; }
+  }
+  const record = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const takes = Array.isArray(record.takes_holders)
+    ? record.takes_holders.map(String).map(s => s.trim()).filter(Boolean)
+    : [];
+  const holder = typeof record.holder === 'string' && record.holder.trim()
+    ? record.holder.trim()
+    : undefined;
+  return { holder, takes_holders: takes.length > 0 ? takes : ['world'] };
+}
+
 interface GBrainOAuthProviderOptions {
   sql: SqlQuery;
   /** Default token TTL in seconds (default: 3600 = 1 hour) */
@@ -494,7 +515,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     try {
       oauthRows = await this.sql`
         SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name,
-               c.source_id, c.federated_read
+               c.source_id, c.federated_read, c.permissions
         FROM oauth_tokens t
         LEFT JOIN oauth_clients c ON c.client_id = t.client_id
         WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
@@ -550,10 +571,13 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       const allowedSources = Array.isArray(federatedRaw)
         ? (federatedRaw as string[])
         : undefined;
+      const permissions = parseClientPermissions(row.permissions);
       return {
         token,
         clientId: row.client_id as string,
         clientName: (row.client_name as string | null) ?? undefined,
+        holder: permissions.holder,
+        takesHoldersAllowList: permissions.takes_holders,
         scopes: (row.scopes as string[]) || [],
         expiresAt,
         resource: row.resource ? new URL(row.resource as string) : undefined,
@@ -570,7 +594,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
 
     // Fallback: legacy access_tokens table (backward compat)
     const legacyRows = await this.sql`
-      SELECT name FROM access_tokens
+      SELECT name, permissions FROM access_tokens
       WHERE token_hash = ${tokenHash} AND revoked_at IS NULL
     `;
 
@@ -582,10 +606,13 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         UPDATE access_tokens SET last_used_at = now() WHERE token_hash = ${tokenHash}
       `;
       const name = legacyRows[0].name as string;
+      const permissions = parseClientPermissions(legacyRows[0].permissions);
       return {
         token,
         clientId: name,
         clientName: name,
+        holder: permissions.holder,
+        takesHoldersAllowList: permissions.takes_holders,
         scopes: ['read', 'write', 'admin'],
         expiresAt: Math.floor(Date.now() / 1000) + 365 * 24 * 3600, // Legacy tokens never expire — set 1yr future
         // v0.34.1 (#861, D13): legacy bearer tokens default to 'default'
@@ -755,6 +782,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     redirectUris: string[] = [],
     sourceId: string = 'default',
     federatedRead?: string[],
+    options: { holder?: string; takesHolders?: string[] } = {},
   ): Promise<{ clientId: string; clientSecret: string }> {
     // v0.28: ALLOWED_SCOPES allowlist. Reject `--scopes "read flying-unicorn"`
     // at registration so meaningless scope strings can't pile up in the DB.
@@ -766,6 +794,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const clientSecret = generateToken('gbrain_cs_');
     const secretHash = hashToken(clientSecret);
     const now = Math.floor(Date.now() / 1000);
+    const permissionsJson = JSON.stringify({
+      holder: options.holder || undefined,
+      takes_holders: options.takesHolders && options.takesHolders.length > 0 ? options.takesHolders : ['world'],
+    });
 
     // v0.34.1 (#861 + #876): persist source_id AND federated_read so
     // verifyAccessToken can populate both AuthInfo fields. Defaults:
@@ -777,10 +809,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       await this.sql`
         INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
                                     grant_types, scope, client_id_issued_at,
-                                    source_id, federated_read)
+                                    source_id, federated_read, permissions)
         VALUES (${clientId}, ${secretHash}, ${name},
                 ${pgArray(redirectUris)}, ${pgArray(grantTypes)}, ${scopes}, ${now},
-                ${sourceId}, ${pgArray(federated)})
+                ${sourceId}, ${pgArray(federated)}, CAST(${permissionsJson} AS jsonb))
       `;
     } catch (err) {
       // Pre-v60 / pre-v61 brain: column missing. Fall back through both

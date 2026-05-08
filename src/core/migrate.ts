@@ -4052,6 +4052,23 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE facts ADD COLUMN IF NOT EXISTS event_type TEXT;
     `,
   },
+  {
+    version: 90,
+    name: 'oauth_clients_permissions_spark',
+    // Spark local patch: per-client OAuth identity and takes-holder visibility.
+    // Upstream owns source isolation/federated_read; this preserves
+    // Mark's remote-client holder/takes_holders privacy contract on top.
+    idempotent: true,
+    sql: `
+      ALTER TABLE oauth_clients
+        ADD COLUMN IF NOT EXISTS permissions JSONB
+          DEFAULT '{"takes_holders":["world"]}'::jsonb;
+
+      UPDATE oauth_clients
+        SET permissions = '{"takes_holders":["world"]}'::jsonb
+        WHERE permissions IS NULL OR permissions = '{}'::jsonb;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
