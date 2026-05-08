@@ -63,5 +63,16 @@ describe('E2E: MCP Tool Generation', () => {
     const mod = await import('../../src/mcp/server.ts');
     expect(typeof mod.startMcpServer).toBe('function');
     expect(typeof mod.handleToolCall).toBe('function');
+    expect(typeof mod.resolveStdioTakesHoldersAllowList).toBe('function');
+  });
+
+  test('stdio takes holder allow-list defaults closed and supports trusted local override', async () => {
+    const { resolveStdioTakesHoldersAllowList } = await import('../../src/mcp/server.ts');
+
+    expect(resolveStdioTakesHoldersAllowList({})).toEqual(['world']);
+    expect(resolveStdioTakesHoldersAllowList({ GBRAIN_MCP_STDIO_TAKES_HOLDERS: '   ' })).toEqual(['world']);
+    expect(resolveStdioTakesHoldersAllowList({ GBRAIN_MCP_STDIO_TAKES_HOLDERS: 'world,garry, brain ' })).toEqual(['world', 'garry', 'brain']);
+    expect(resolveStdioTakesHoldersAllowList({ GBRAIN_MCP_STDIO_TAKES_HOLDERS: 'all' })).toBeUndefined();
+    expect(resolveStdioTakesHoldersAllowList({ GBRAIN_MCP_STDIO_TAKES_HOLDERS: '*' })).toBeUndefined();
   });
 });
