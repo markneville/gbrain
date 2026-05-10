@@ -15,7 +15,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { hybridSearch } from '../src/core/search/hybrid.ts';
+import { hybridSearch, normalizeDateFilter } from '../src/core/search/hybrid.ts';
 import type { PageInput, HybridSearchMeta } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
@@ -90,6 +90,26 @@ describe('hybridSearch onMeta callback — expansion_applied', () => {
       expandFn: async () => ['alice', 'alice example', 'the person alice'],
     });
     expect(meta!.expansion_applied).toBe(false);
+  });
+});
+
+describe('hybridSearch date filter normalization', () => {
+  test('normalizes relative since/until filters before engine SQL casts', () => {
+    const now = Date.parse('2026-05-08T12:00:00.000Z');
+    expect(normalizeDateFilter('7d', 'since', now)).toBe('2026-05-01T12:00:00.000Z');
+    expect(normalizeDateFilter('2w', 'since', now)).toBe('2026-04-24T12:00:00.000Z');
+    expect(normalizeDateFilter('1y', 'until', now)).toBe('2025-05-08T12:00:00.000Z');
+  });
+
+  test('normalizes plain ISO dates with boundary-aware day semantics', () => {
+    expect(normalizeDateFilter('2026-05-08', 'since')).toBe('2026-05-08T00:00:00.000Z');
+    expect(normalizeDateFilter('2026-05-08', 'until')).toBe('2026-05-08T23:59:59.999Z');
+  });
+
+  test('hybridSearch accepts relative since=7d without Invalid Date SQL failure', async () => {
+    delete process.env.OPENAI_API_KEY;
+    const out = await hybridSearch(engine, 'alice', { since: '7d' });
+    expect(Array.isArray(out)).toBe(true);
   });
 });
 

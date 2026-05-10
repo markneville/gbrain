@@ -43,6 +43,46 @@ const COMPILED_TRUTH_BOOST = 2.0;
 const BACKLINK_BOOST_COEF = 0.05;
 const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === '1';
 
+const RELATIVE_DATE_RE = /^(\d+)\s*([dwy])$/i;
+const PLAIN_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 86_400_000;
+
+/**
+ * v0.29.1 — normalize public since/until date filters before they reach
+ * engine SQL casts. The public operation docs promise ISO-8601 or relative
+ * durations like `7d`, `2w`, `1y`; engines intentionally stay dumb and accept
+ * concrete timestamps only.
+ */
+export function normalizeDateFilter(
+  value: string | undefined,
+  boundary: 'since' | 'until',
+  nowMs: number = Date.now(),
+): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const rel = trimmed.match(RELATIVE_DATE_RE);
+  if (rel) {
+    const n = Number.parseInt(rel[1]!, 10);
+    const unit = rel[2]!.toLowerCase();
+    const days = unit === 'd' ? n : unit === 'w' ? n * 7 : n * 365;
+    return new Date(nowMs - days * DAY_MS).toISOString();
+  }
+
+  if (PLAIN_DATE_RE.test(trimmed)) {
+    return boundary === 'until'
+      ? `${trimmed}T23:59:59.999Z`
+      : `${trimmed}T00:00:00.000Z`;
+  }
+
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid ${boundary} date filter: ${value} (use ISO-8601 or relative duration like 7d, 2w, 1y)`);
+  }
+  return parsed.toISOString();
+}
+
 /**
  * Apply backlink boost to a result list in place. Mutates each result's score
  * by (1 + BACKLINK_BOOST_COEF * log(1 + count)). Pure data transform; no DB call.
@@ -377,10 +417,10 @@ export async function hybridSearch(
     // pages instead of being eaten by note/transcript/article pages.
     types: opts?.types,
     // v0.29.1: since/until take precedence over deprecated afterDate/beforeDate.
-    // The engine still consumes the legacy field names; this aliasing keeps
-    // PR #618 callers compiling while the new names are the public surface.
-    afterDate: opts?.since ?? opts?.afterDate,
-    beforeDate: opts?.until ?? opts?.beforeDate,
+    // Normalize relative public API forms before engine SQL casts. Engines
+    // still consume the legacy field names for back-compat.
+    afterDate: normalizeDateFilter(opts?.since ?? opts?.afterDate, 'since'),
+    beforeDate: normalizeDateFilter(opts?.until ?? opts?.beforeDate, 'until'),
     // v0.34.1 (#861, D9 — P0 leak seal): thread source-scoping through so the
     // inner engine.searchKeyword / engine.searchVector calls apply the
     // WHERE source_id filter at SQL level. Pre-fix, this explicit pick

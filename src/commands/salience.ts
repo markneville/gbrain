@@ -16,6 +16,8 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
+import type { SalienceResult } from '../core/types.ts';
+import { PrivacyRedactionError, safeSalienceResults } from '../core/privacy-redaction.ts';
 
 interface RunOpts {
   days?: number;
@@ -74,7 +76,7 @@ export async function runSalience(engine: BrainEngine, args: string[]): Promise<
   // through the remote `get_recent_salience` MCP op. Output format is
   // identical because both paths return the same shape (the op handler IS
   // engine.getRecentSalience).
-  let rows;
+  let rawRows: Awaited<ReturnType<BrainEngine['getRecentSalience']>>;
   const cfg = loadConfig();
   if (isThinClient(cfg)) {
     const raw = await callRemoteTool(cfg!, 'get_recent_salience', {
@@ -82,13 +84,23 @@ export async function runSalience(engine: BrainEngine, args: string[]): Promise<
       limit: parsed.limit,
       slugPrefix: parsed.slugPrefix,
     }, { timeoutMs: 30_000 });
-    rows = unpackToolResult<Awaited<ReturnType<BrainEngine['getRecentSalience']>>>(raw);
+    rawRows = unpackToolResult<Awaited<ReturnType<BrainEngine['getRecentSalience']>>>(raw);
   } else {
-    rows = await engine.getRecentSalience({
+    rawRows = await engine.getRecentSalience({
       days: parsed.days,
       limit: parsed.limit,
       slugPrefix: parsed.slugPrefix,
     });
+  }
+
+  let rows: SalienceResult[];
+  try {
+    rows = safeSalienceResults(rawRows);
+  } catch (err) {
+    if (err instanceof PrivacyRedactionError) {
+      throw new Error('salience output failed the privacy redaction gate; freeze automated emission and use manual category-only summaries');
+    }
+    throw err;
   }
   if (parsed.json) {
     console.log(JSON.stringify(rows, null, 2));
