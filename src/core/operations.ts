@@ -41,6 +41,7 @@ import {
   CODE_DEF_DESCRIPTION,
   CODE_REFS_DESCRIPTION,
 } from './operations-descriptions.ts';
+import { PrivacyRedactionError, safeAnomalyResults, safeSalienceResults } from './privacy-redaction.ts';
 
 // --- Types ---
 
@@ -2745,12 +2746,24 @@ const get_recent_salience: Operation = {
   },
   handler: async (ctx, p) => {
     const recencyBias = p.recency_bias === 'on' ? 'on' : 'flat';
-    return ctx.engine.getRecentSalience({
+    const rows = await ctx.engine.getRecentSalience({
       days: typeof p.days === 'number' ? p.days : undefined,
       limit: typeof p.limit === 'number' ? p.limit : undefined,
       slugPrefix: typeof p.slugPrefix === 'string' ? p.slugPrefix : undefined,
       recency_bias: recencyBias,
     });
+    try {
+      return safeSalienceResults(rows);
+    } catch (err) {
+      if (err instanceof PrivacyRedactionError) {
+        throw new OperationError(
+          'permission_denied',
+          'salience output failed the privacy redaction gate',
+          'Freeze automated salience/cockpit emission and use manual category-only summaries until the redaction patterns are updated.',
+        );
+      }
+      throw err;
+    }
   },
   cliHints: { name: 'salience' },
 };
@@ -2774,11 +2787,23 @@ const find_anomalies: Operation = {
     },
   },
   handler: async (ctx, p) => {
-    return ctx.engine.findAnomalies({
+    const rows = await ctx.engine.findAnomalies({
       since: typeof p.since === 'string' ? p.since : undefined,
       lookback_days: typeof p.lookback_days === 'number' ? p.lookback_days : undefined,
       sigma: typeof p.sigma === 'number' ? p.sigma : undefined,
     });
+    try {
+      return safeAnomalyResults(rows);
+    } catch (err) {
+      if (err instanceof PrivacyRedactionError) {
+        throw new OperationError(
+          'permission_denied',
+          'anomaly output failed the privacy redaction gate',
+          'Freeze automated anomaly/cockpit emission and use manual category-only summaries until the redaction patterns are updated.',
+        );
+      }
+      throw err;
+    }
   },
   cliHints: { name: 'anomalies' },
 };

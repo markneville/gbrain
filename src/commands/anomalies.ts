@@ -18,6 +18,8 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
+import type { AnomalyResult } from '../core/types.ts';
+import { PrivacyRedactionError, safeAnomalyResults } from '../core/privacy-redaction.ts';
 
 interface RunOpts {
   since?: string;
@@ -70,7 +72,7 @@ export async function runAnomalies(engine: BrainEngine, args: string[]): Promise
     return;
   }
   // v0.31.1 (Issue #734): on thin-client installs, route via MCP.
-  let rows;
+  let rawRows: Awaited<ReturnType<BrainEngine['findAnomalies']>>;
   const cfg = loadConfig();
   if (isThinClient(cfg)) {
     const raw = await callRemoteTool(cfg!, 'find_anomalies', {
@@ -78,13 +80,23 @@ export async function runAnomalies(engine: BrainEngine, args: string[]): Promise
       lookback_days: parsed.lookbackDays,
       sigma: parsed.sigma,
     }, { timeoutMs: 30_000 });
-    rows = unpackToolResult<Awaited<ReturnType<BrainEngine['findAnomalies']>>>(raw);
+    rawRows = unpackToolResult<Awaited<ReturnType<BrainEngine['findAnomalies']>>>(raw);
   } else {
-    rows = await engine.findAnomalies({
+    rawRows = await engine.findAnomalies({
       since: parsed.since,
       lookback_days: parsed.lookbackDays,
       sigma: parsed.sigma,
     });
+  }
+
+  let rows: AnomalyResult[];
+  try {
+    rows = safeAnomalyResults(rawRows);
+  } catch (err) {
+    if (err instanceof PrivacyRedactionError) {
+      throw new Error('anomaly output failed the privacy redaction gate; freeze automated emission and use manual category-only summaries');
+    }
+    throw err;
   }
   if (parsed.json) {
     console.log(JSON.stringify(rows, null, 2));
