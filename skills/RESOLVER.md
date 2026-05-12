@@ -129,3 +129,48 @@ These apply to ALL brain-writing skills:
 | "make pdf from brain", "brain pdf", "convert brain page to pdf", "publish this page as pdf", "export brain page" | `skills/brain-pdf/SKILL.md` |
 | "voice note", "ingest this voice memo", "transcribe and file", "voice note ingest", "save this audio note" | `skills/voice-note-ingest/SKILL.md` |
 
+
+<!-- gbrain:skillpack:begin -->
+
+<!-- Installed by gbrain 0.32.3.0 — do not hand-edit between markers. -->
+<!-- gbrain:skillpack:manifest cumulative-slugs="academic-verify,archive-crawler,article-enrichment,book-mirror,brain-ops,brain-pdf,briefing,citation-fixer,concept-synthesis,cron-scheduler,cross-modal-review,daily-task-manager,daily-task-prep,data-research,enrich,functional-area-resolver,idea-ingest,ingest,maintain,media-ingest,meeting-ingestion,minion-orchestrator,perplexity-research,query,repo-architecture,reports,signal-detector,skill-creator,skillify,skillpack-check,soul-audit,strategic-reading,testing,voice-note-ingest,webhook-transforms" version="0.32.3.0" -->
+
+| Trigger | Skill |
+|---------|-------|
+| "academic-verify" | `skills/academic-verify/SKILL.md` |
+| "archive-crawler" | `skills/archive-crawler/SKILL.md` |
+| "article-enrichment" | `skills/article-enrichment/SKILL.md` |
+| "book-mirror" | `skills/book-mirror/SKILL.md` |
+| "brain-ops" | `skills/brain-ops/SKILL.md` |
+| "brain-pdf" | `skills/brain-pdf/SKILL.md` |
+| "briefing" | `skills/briefing/SKILL.md` |
+| "citation-fixer" | `skills/citation-fixer/SKILL.md` |
+| "concept-synthesis" | `skills/concept-synthesis/SKILL.md` |
+| "cron-scheduler" | `skills/cron-scheduler/SKILL.md` |
+| "cross-modal-review" | `skills/cross-modal-review/SKILL.md` |
+| "daily-task-manager" | `skills/daily-task-manager/SKILL.md` |
+| "daily-task-prep" | `skills/daily-task-prep/SKILL.md` |
+| "data-research" | `skills/data-research/SKILL.md` |
+| "enrich" | `skills/enrich/SKILL.md` |
+| "functional-area-resolver" | `skills/functional-area-resolver/SKILL.md` |
+| "idea-ingest" | `skills/idea-ingest/SKILL.md` |
+| "ingest" | `skills/ingest/SKILL.md` |
+| "maintain" | `skills/maintain/SKILL.md` |
+| "media-ingest" | `skills/media-ingest/SKILL.md` |
+| "meeting-ingestion" | `skills/meeting-ingestion/SKILL.md` |
+| "minion-orchestrator" | `skills/minion-orchestrator/SKILL.md` |
+| "perplexity-research" | `skills/perplexity-research/SKILL.md` |
+| "query" | `skills/query/SKILL.md` |
+| "repo-architecture" | `skills/repo-architecture/SKILL.md` |
+| "reports" | `skills/reports/SKILL.md` |
+| "signal-detector" | `skills/signal-detector/SKILL.md` |
+| "skill-creator" | `skills/skill-creator/SKILL.md` |
+| "skillify" | `skills/skillify/SKILL.md` |
+| "skillpack-check" | `skills/skillpack-check/SKILL.md` |
+| "soul-audit" | `skills/soul-audit/SKILL.md` |
+| "strategic-reading" | `skills/strategic-reading/SKILL.md` |
+| "testing" | `skills/testing/SKILL.md` |
+| "voice-note-ingest" | `skills/voice-note-ingest/SKILL.md` |
+| "webhook-transforms" | `skills/webhook-transforms/SKILL.md` |
+
+<!-- gbrain:skillpack:end -->
