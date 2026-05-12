@@ -1541,13 +1541,13 @@ describe('migration v51 — facts_fence_columns (v0.32.2)', () => {
 // statement_timeout + idle_in_transaction_session_timeout delivered as
 // startup parameters kill those backends on the server side.
 
-describe('migration v44 — oauth_client_permissions', () => {
+describe('migration v55 — oauth_client_permissions', () => {
   test('exists with expected name and idempotent ALTER', () => {
-    const v44 = MIGRATIONS.find(m => m.version === 44);
-    expect(v44).toBeDefined();
-    expect(v44?.name).toBe('oauth_client_permissions');
-    expect(v44?.sql).toContain('ALTER TABLE oauth_clients');
-    expect(v44?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
+    const migration = MIGRATIONS.find(m => m.name === 'oauth_client_permissions');
+    expect(migration).toBeDefined();
+    expect(migration?.version).toBe(55);
+    expect(migration?.sql).toContain('ALTER TABLE oauth_clients');
+    expect(migration?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
   });
 
   test('fresh Postgres/PGLite schemas include OAuth and legacy token permissions defaults', async () => {
@@ -1560,22 +1560,22 @@ describe('migration v44 — oauth_client_permissions', () => {
     }
   });
 
-  test('LATEST_VERSION caught up to 44', () => {
-    expect(LATEST_VERSION).toBeGreaterThanOrEqual(44);
+  test('LATEST_VERSION caught up to 55', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(55);
   });
 });
 
-describe('migration v45 — legacy_access_token_permissions', () => {
+describe('migration v38 — access_tokens_permissions', () => {
   test('exists with expected name and idempotent ALTER', () => {
-    const v45 = MIGRATIONS.find(m => m.version === 45);
-    expect(v45).toBeDefined();
-    expect(v45?.name).toBe('legacy_access_token_permissions');
-    expect(v45?.sql).toContain('ALTER TABLE access_tokens');
-    expect(v45?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
+    const migration = MIGRATIONS.find(m => m.name === 'access_tokens_permissions');
+    expect(migration).toBeDefined();
+    expect(migration?.version).toBe(38);
+    expect(migration?.sql).toContain('ALTER TABLE access_tokens');
+    expect(migration?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
   });
 
-  test('LATEST_VERSION caught up to 45', () => {
-    expect(LATEST_VERSION).toBeGreaterThanOrEqual(45);
+  test('LATEST_VERSION caught up to 38', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(38);
   });
 });
 
