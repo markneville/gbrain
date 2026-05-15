@@ -41,6 +41,16 @@ function flagPresent(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+function parseHolderSpecs(raw: string | undefined): Array<{ holder: string; label: string }> | undefined {
+  if (!raw) return undefined;
+  const specs = raw.split(',').map(s => s.trim()).filter(Boolean);
+  if (specs.length === 0) return undefined;
+  return specs.map(spec => {
+    const [holder, label] = spec.split(':', 2).map(s => s.trim());
+    return { holder, label: label || `${holder}-holder` };
+  });
+}
+
 async function resolveBrainDir(engine: BrainEngine | null, explicitDir: string | null): Promise<string> {
   if (explicitDir) {
     if (!existsSync(explicitDir)) {
@@ -507,9 +517,63 @@ async function cmdCalibration(engine: BrainEngine, args: string[]): Promise<void
   }
 }
 
+/**
+ * v0 stale-bet sweep for SOD/EOD context generation.
+ * Read-only and deterministic: lists active unresolved bets older than the
+ * WIP-limit threshold, grouped by holder. No autonomous cron and no writes.
+ */
+async function cmdStaleSweep(engine: BrainEngine, args: string[]): Promise<void> {
+  const holdersArg = flagValue(args, '--holders');
+  const staleAfterStr = flagValue(args, '--stale-after-days');
+  const explicitAfterStr = flagValue(args, '--explicit-after-days');
+  const limitStr = flagValue(args, '--limit');
+  const nowStr = flagValue(args, '--now');
+
+  const { DEFAULT_STALE_SWEEP_HOLDERS, buildBetResolutionSweepReport } = await import('../core/takes-stale-sweep.ts');
+  const holders = parseHolderSpecs(holdersArg) ?? DEFAULT_STALE_SWEEP_HOLDERS;
+  const staleAfterDays = staleAfterStr === undefined ? 7 : parseInt(staleAfterStr, 10);
+  const explicitDecisionAfterDays = explicitAfterStr === undefined ? 14 : parseInt(explicitAfterStr, 10);
+  const limit = limitStr === undefined ? 500 : parseInt(limitStr, 10);
+  const now = nowStr === undefined ? new Date() : new Date(nowStr);
+
+  if (!Number.isFinite(staleAfterDays) || staleAfterDays < 0) {
+    console.error(`Invalid --stale-after-days "${staleAfterStr}". Expected a non-negative integer.`);
+    process.exit(1);
+  }
+  if (!Number.isFinite(explicitDecisionAfterDays) || explicitDecisionAfterDays < staleAfterDays) {
+    console.error(`Invalid --explicit-after-days "${explicitAfterStr}". Expected an integer >= stale threshold.`);
+    process.exit(1);
+  }
+  if (!Number.isFinite(limit) || limit <= 0) {
+    console.error(`Invalid --limit "${limitStr}". Expected a positive integer.`);
+    process.exit(1);
+  }
+  if (Number.isNaN(now.valueOf())) {
+    console.error(`Invalid --now "${nowStr}". Expected an ISO date or datetime.`);
+    process.exit(1);
+  }
+
+  const batches = await Promise.all(holders.map(h => engine.listTakes({
+    holder: h.holder,
+    kind: 'bet',
+    active: true,
+    resolved: false,
+    sortBy: 'created_at',
+    limit,
+  })));
+  const takes = batches.flat();
+
+  console.log(buildBetResolutionSweepReport(takes, {
+    now,
+    holders,
+    staleAfterDays,
+    explicitDecisionAfterDays,
+  }));
+}
+
 // --- Dispatcher ---
 
-export async function runTakes(engine: BrainEngine, args: string[]): Promise<void> {
+export async function runTakes(engine: BrainEngine | null, args: string[]): Promise<void> {
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
     console.log(`Usage: gbrain takes <subcommand> [options]
 
@@ -533,12 +597,20 @@ Subcommands:
                                           Aggregate calibration scorecard (v0.30.0)
   takes calibration [<holder>] [--bucket-size 0.1] [--json]
                                           Calibration curve binned by stated weight (v0.30.0)
+  takes stale-sweep [--holders mark:Mark-holder,seb:Seb-holder,brain:brain-holder]
+                    [--stale-after-days 7] [--explicit-after-days 14] [--limit 500]
+                                          Read-only stale unresolved bet sweep for SOD/EOD context
 
 Common flags:
   --dir <path>    Override the brain directory (default: sync.repo_path config)
   --help, -h      Show this help
 `);
     return;
+  }
+
+  if (!engine) {
+    console.error('No brain configured. Run: gbrain init');
+    process.exit(1);
   }
 
   const sub = args[0];
@@ -552,6 +624,7 @@ Common flags:
     case 'resolve':     return cmdResolve(engine, rest);
     case 'scorecard':   return cmdScorecard(engine, rest);
     case 'calibration': return cmdCalibration(engine, rest);
+    case 'stale-sweep': return cmdStaleSweep(engine, rest);
     default:
       // No subcommand keyword → treat first arg as <slug> for the list path.
       return cmdList(engine, args);

@@ -67,10 +67,17 @@ Compile a daily briefing from brain context.
    - Follow-ups that are overdue
 4. **Recent changes.** Pages updated in the last 24 hours:
    - What changed and why (read timeline entries from gbrain)
-5. **People in play.** List person pages in gbrain sorted by recency:
+5. **Bet-resolution sweep.** For SOD/EOD accountability contexts, run the deterministic read-only sweep:
+
+   ```bash
+   gbrain takes stale-sweep --holders mark:Mark-holder,seb:Seb-holder,brain:brain-holder
+   ```
+
+   Include the output as a compact "Bet-resolution sweep" section. Treat stale rows as WIP-limit breaches, not judgement. Do not resolve, supersede, update dates, or schedule a new cron from the briefing path.
+6. **People in play.** List person pages in gbrain sorted by recency:
    - Updated in last 7 days
    - Have high activity (many recent timeline entries)
-6. **Stale alerts.** From gbrain health check:
+7. **Stale alerts.** From gbrain health check:
    - Pages flagged as stale that are relevant to today's meetings
 
 ## GBrain-Native Context Loading
@@ -115,6 +122,9 @@ ACTIVE DEALS
 
 ACTION ITEMS
 - [item] -- due [date], related to [slug]
+
+BET-RESOLUTION SWEEP
+- Paste `gbrain takes stale-sweep ...` output, or the quiet no-stale line.
 
 RECENT CHANGES (24h)
 - [slug] -- [what changed]

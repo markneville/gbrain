@@ -37,7 +37,7 @@ const CLI_ONLY_SELF_HELP = new Set([
   'skillpack', 'skillpack-check',
   'integrations', 'friction',
   'frontmatter', 'check-resolvable',
-  'models',
+  'models', 'takes',
   'cache',
 ]);
 
@@ -994,6 +994,14 @@ async function handleCliOnly(command: string, args: string[]) {
       const { runEvalWhoknows } = await import('./commands/eval-whoknows.ts');
       process.exit(await runEvalWhoknows(null, args.slice(1)));
     }
+  }
+
+  // `takes --help` is command-owned help. Keep it reachable without a DB so
+  // read-only / mutating subcommands can document their own flags before init.
+  if (command === 'takes' && hasHelpFlag(args)) {
+    const { runTakes } = await import('./commands/takes.ts');
+    await runTakes(null, args);
+    return;
   }
 
   // All remaining CLI-only commands need a DB connection
