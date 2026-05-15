@@ -37,7 +37,7 @@ const CLI_ONLY_SELF_HELP = new Set([
   'skillpack', 'skillpack-check',
   'integrations', 'friction',
   'frontmatter', 'check-resolvable',
-  'models',
+  'models', 'takes',
   'cache',
   'brainstorm', 'lsd',
   // v0.39.3.0 WARN-5: capture's detailed HELP constant
@@ -1072,7 +1072,7 @@ async function handleCliOnly(command: string, args: string[]) {
   // a fresh tmpdir with no config gets a no-such-config error instead of
   // help text. Importing runSync without the engine + passing null works
   // because runSync's --help path doesn't touch the engine argument.
-  if (command === 'sync' && (args.includes('--help') || args.includes('-h'))) {
+  if (command === 'sync' && hasHelpFlag(args)) {
     const { runSync } = await import('./commands/sync.ts');
     await runSync(null as any, args);
     return;
@@ -1086,6 +1086,14 @@ async function handleCliOnly(command: string, args: string[]) {
   if (command === 'capture' && (args.includes('--help') || args.includes('-h'))) {
     const { runCapture } = await import('./commands/capture.ts');
     await runCapture(null, args);
+    return;
+  }
+
+  // `takes --help` is command-owned help. Keep it reachable without a DB so
+  // read-only / mutating subcommands can document their own flags before init.
+  if (command === 'takes' && hasHelpFlag(args)) {
+    const { runTakes } = await import('./commands/takes.ts');
+    await runTakes(null, args);
     return;
   }
 

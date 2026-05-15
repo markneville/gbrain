@@ -174,6 +174,29 @@ describe('CLI dispatch integration', () => {
     }
   });
 
+  test('takes --help delegates to takes command help without DB connection', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-cli-help-'));
+    try {
+      const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', 'takes', '--help'], {
+        cwd: repoRoot,
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: isolatedEnv(home),
+      });
+      const stdout = await new Response(proc.stdout).text();
+      const stderr = await new Response(proc.stderr).text();
+      const exitCode = await proc.exited;
+      expect(stdout).toContain('Usage: gbrain takes');
+      expect(stdout).toContain('takes stale-sweep');
+      expect(stdout).toContain('Read-only stale unresolved bet sweep for SOD/EOD context');
+      expect(stdout).not.toContain('run gbrain --help for the full command list');
+      expect(stderr).not.toContain('No brain configured');
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('init --help short-circuits CLI-only dispatch without writing config', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-cli-help-'));
     try {
