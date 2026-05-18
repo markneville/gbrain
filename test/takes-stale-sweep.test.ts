@@ -17,7 +17,7 @@ function bet(overrides: Partial<Take>): Take {
     row_num: 1,
     claim: 'Fixture bet',
     kind: 'bet',
-    holder: 'mark',
+    holder: 'mark-neville',
     weight: 0.6,
     since_date: null,
     until_date: null,
@@ -38,6 +38,14 @@ function bet(overrides: Partial<Take>): Take {
 }
 
 describe('stale bet-resolution sweep', () => {
+  test('default holders use canonical mark-neville Mark-holder, never legacy mark', () => {
+    expect(DEFAULT_STALE_SWEEP_HOLDERS).toEqual([
+      { holder: 'mark-neville', label: 'Mark-holder' },
+      { holder: 'seb', label: 'Seb-holder' },
+      { holder: 'brain', label: 'brain-holder' },
+    ]);
+  });
+
   test('no stale bets produces one quiet non-nagging line', () => {
     const report = buildBetResolutionSweepReport([], {
       now: NOW,
@@ -45,24 +53,30 @@ describe('stale bet-resolution sweep', () => {
     });
 
     expect(report).toContain('Bet-resolution sweep');
-    expect(report).toContain('No stale unresolved bets across Mark-holder, Seb-holder, brain-holder.');
+    expect(report).toContain('Status: GREEN');
+    expect(report).toContain('Holders checked: mark-neville, seb, brain.');
     expect(report).not.toContain('failed');
     expect(report).not.toContain('shame');
   });
 
   test('Mark-holder stale bet is counted and rendered separately', () => {
     const report = buildBetResolutionSweepReport([
-      bet({ holder: 'mark', claim: 'Mark prediction needs a check', weight: 0.72, until_date: '2026-05-05' }),
+      bet({ holder: 'mark-neville', claim: 'Mark prediction needs a check', weight: 0.72, until_date: '2026-05-05' }),
     ], { now: NOW, holders: DEFAULT_STALE_SWEEP_HOLDERS });
 
     expect(report).toContain('Counts by holder: Mark-holder=1, Seb-holder=0, brain-holder=0');
     expect(report).toContain('## Mark-holder');
     expect(report).toContain('Mark prediction needs a check');
-    expect(report).toContain('holder: mark');
+    expect(report).toContain('holder: mark-neville');
+    expect(report).not.toContain('holder: mark\n');
     expect(report).toContain('confidence: 0.72');
     expect(report).toContain('age: 8 days');
     expect(report).toContain('due/target: 2026-05-05');
-    expect(report).toContain('next: resolve / update date / leave active with reason');
+    expect(report).toContain('status: stale');
+    expect(report).toContain('severity: yellow');
+    expect(report).toContain('action: ask_holder');
+    expect(report).toContain('prompt target: mark');
+    expect(report).toContain('why now: crossed 7-day stale threshold');
   });
 
   test('Seb-holder stale bet is counted without mixing with Mark-holder', () => {
@@ -89,7 +103,7 @@ describe('stale bet-resolution sweep', () => {
 
   test('month-precision due dates are used before created_at fallback', () => {
     const stale = findStaleBetSweepItems([
-      bet({ holder: 'mark', claim: 'Month target stale', until_date: '2026-05', created_at: '2026-05-12T09:00:00Z' }),
+      bet({ holder: 'mark-neville', claim: 'Month target stale', until_date: '2026-05', created_at: '2026-05-12T09:00:00Z' }),
     ], { now: NOW, holders: DEFAULT_STALE_SWEEP_HOLDERS });
 
     expect(stale).toHaveLength(1);
@@ -101,7 +115,7 @@ describe('stale bet-resolution sweep', () => {
 
   test('items older than 14 days are called out as needing explicit decision', () => {
     const report = buildBetResolutionSweepReport([
-      bet({ holder: 'mark', claim: 'Old bet needs explicit decision', until_date: '2026-04-28' }),
+      bet({ holder: 'mark-neville', claim: 'Old bet needs explicit decision', until_date: '2026-04-28' }),
     ], { now: NOW, holders: DEFAULT_STALE_SWEEP_HOLDERS });
 
     expect(report).toContain('Needs explicit decision (>14 days)');
@@ -110,8 +124,8 @@ describe('stale bet-resolution sweep', () => {
 
   test('missing due date falls back to created_at for age calculation', () => {
     const stale = findStaleBetSweepItems([
-      bet({ holder: 'mark', claim: 'Fallback stale', created_at: '2026-05-05T23:59:00Z', until_date: null, since_date: null }),
-      bet({ id: 2, row_num: 2, holder: 'mark', claim: 'Fallback fresh', created_at: '2026-05-06T00:01:00Z', until_date: null, since_date: null }),
+      bet({ holder: 'mark-neville', claim: 'Fallback stale', created_at: '2026-05-05T23:59:00Z', until_date: null, since_date: null }),
+      bet({ id: 2, row_num: 2, holder: 'mark-neville', claim: 'Fallback fresh', created_at: '2026-05-06T00:01:00Z', until_date: null, since_date: null }),
     ], { now: NOW, holders: DEFAULT_STALE_SWEEP_HOLDERS });
 
     expect(stale).toHaveLength(1);
@@ -125,8 +139,8 @@ describe('stale bet-resolution sweep', () => {
     const engine = {
       listTakes: async (opts: unknown) => {
         calls.push(opts);
-        if ((opts as { holder: string }).holder !== 'mark') return [];
-        return [bet({ holder: 'mark', claim: 'CLI stale bet', until_date: '2026-05-05' })];
+        if ((opts as { holder: string }).holder !== 'mark-neville') return [];
+        return [bet({ holder: 'mark-neville', claim: 'CLI stale bet', until_date: '2026-05-05' })];
       },
     };
     const lines: string[] = [];
@@ -136,14 +150,14 @@ describe('stale bet-resolution sweep', () => {
       await runTakes(engine as any, [
         'stale-sweep',
         '--now', '2026-05-13T12:00:00Z',
-        '--holders', 'mark:Mark-holder,seb:Seb-holder,brain:brain-holder',
+        '--holders', 'mark-neville:Mark-holder,seb:Seb-holder,brain:brain-holder',
       ]);
     } finally {
       console.log = original;
     }
 
     expect(calls).toEqual([
-      { holder: 'mark', kind: 'bet', active: true, resolved: false, sortBy: 'created_at', limit: 500 },
+      { holder: 'mark-neville', kind: 'bet', active: true, resolved: false, sortBy: 'created_at', limit: 500 },
       { holder: 'seb', kind: 'bet', active: true, resolved: false, sortBy: 'created_at', limit: 500 },
       { holder: 'brain', kind: 'bet', active: true, resolved: false, sortBy: 'created_at', limit: 500 },
     ]);
