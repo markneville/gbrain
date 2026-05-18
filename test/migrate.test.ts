@@ -1545,7 +1545,7 @@ describe('migration v55 — oauth_client_permissions', () => {
   test('exists with expected name and idempotent ALTER', () => {
     const migration = MIGRATIONS.find(m => m.name === 'oauth_client_permissions');
     expect(migration).toBeDefined();
-    expect(migration?.version).toBe(55);
+    expect(migration?.version).toBe(68);
     expect(migration?.sql).toContain('ALTER TABLE oauth_clients');
     expect(migration?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
   });

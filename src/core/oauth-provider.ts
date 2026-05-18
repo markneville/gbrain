@@ -780,10 +780,12 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     grantTypes: string[],
     scopes: string,
     redirectUris: string[] = [],
-    sourceId: string = 'default',
+    sourceIdOrOptions: string | { holder?: string; takesHolders?: string[] } = 'default',
     federatedRead?: string[],
     options: { holder?: string; takesHolders?: string[] } = {},
   ): Promise<{ clientId: string; clientSecret: string }> {
+    const sourceId = typeof sourceIdOrOptions === 'string' ? sourceIdOrOptions : 'default';
+    const permissionOptions = typeof sourceIdOrOptions === 'object' ? sourceIdOrOptions : options;
     // v0.28: ALLOWED_SCOPES allowlist. Reject `--scopes "read flying-unicorn"`
     // at registration so meaningless scope strings can't pile up in the DB.
     // Pre-allowlist clients keep working (allowlist is registration-time;
@@ -795,8 +797,8 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const secretHash = hashToken(clientSecret);
     const now = Math.floor(Date.now() / 1000);
     const permissionsJson = JSON.stringify({
-      holder: options.holder || undefined,
-      takes_holders: options.takesHolders && options.takesHolders.length > 0 ? options.takesHolders : ['world'],
+      holder: permissionOptions.holder || undefined,
+      takes_holders: permissionOptions.takesHolders && permissionOptions.takesHolders.length > 0 ? permissionOptions.takesHolders : ['world'],
     });
 
     // v0.34.1 (#861 + #876): persist source_id AND federated_read so
