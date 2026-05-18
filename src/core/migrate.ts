@@ -3243,7 +3243,7 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 68,
-    name: 'oauth_clients_permissions_spark',
+    name: 'oauth_client_permissions',
     // Spark local patch: per-client OAuth identity and takes-holder visibility.
     // Upstream v0.35.x owns source isolation/federated_read; this preserves
     // Mark's remote-client holder/takes_holders privacy contract on top.
