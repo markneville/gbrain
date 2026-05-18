@@ -70,7 +70,7 @@ Compile a daily briefing from brain context.
 5. **Bet-resolution sweep.** For SOD/EOD accountability contexts, run the deterministic read-only sweep:
 
    ```bash
-   gbrain takes stale-sweep --holders mark:Mark-holder,seb:Seb-holder,brain:brain-holder
+   gbrain takes stale-sweep --holders mark-neville:Mark-holder,seb:Seb-holder,brain:brain-holder
    ```
 
    Include the output as a compact "Bet-resolution sweep" section. Treat stale rows as WIP-limit breaches, not judgement. Do not resolve, supersede, update dates, or schedule a new cron from the briefing path.

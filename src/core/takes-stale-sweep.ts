@@ -6,7 +6,7 @@ export interface StaleSweepHolder {
 }
 
 export const DEFAULT_STALE_SWEEP_HOLDERS: StaleSweepHolder[] = [
-  { holder: 'mark', label: 'Mark-holder' },
+  { holder: 'mark-neville', label: 'Mark-holder' },
   { holder: 'seb', label: 'Seb-holder' },
   { holder: 'brain', label: 'brain-holder' },
 ];
@@ -30,6 +30,11 @@ export interface StaleBetSweepItem {
   referenceDate: string;
   referenceSource: 'due' | 'effective' | 'created';
   needsExplicitDecision: boolean;
+  status: 'stale' | 'decision_breach';
+  wipSeverity: 'yellow' | 'red';
+  recommendedAction: 'resolve' | 'ask_holder';
+  promptTarget: 'seb' | 'mark' | 'brain-maintenance';
+  whyNow: string;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -93,6 +98,8 @@ export function findStaleBetSweepItems(
       if (!ref) return null;
       const ageDays = Math.floor((today - utcDay(ref.date)) / DAY_MS);
       if (ageDays <= options.staleAfterDays) return null;
+      const status = ageDays > options.explicitDecisionAfterDays ? 'decision_breach' : 'stale';
+      const route = routeForHolder(t.holder);
       return {
         id: Number(t.id),
         pageSlug: t.page_slug,
@@ -104,7 +111,12 @@ export function findStaleBetSweepItems(
         ageDays,
         referenceDate: ref.iso,
         referenceSource: ref.source,
-        needsExplicitDecision: ageDays > options.explicitDecisionAfterDays,
+        needsExplicitDecision: status === 'decision_breach',
+        status,
+        wipSeverity: status === 'decision_breach' ? 'red' : 'yellow',
+        recommendedAction: route.recommendedAction,
+        promptTarget: route.promptTarget,
+        whyNow: status === 'decision_breach' ? 'over 14-day decision-breach threshold' : 'crossed 7-day stale threshold',
       } satisfies StaleBetSweepItem;
     })
     .filter((x): x is StaleBetSweepItem => x !== null)
@@ -130,6 +142,12 @@ function referenceLabel(item: StaleBetSweepItem): string {
   return `created: ${item.referenceDate}`;
 }
 
+function routeForHolder(holder: string): { recommendedAction: StaleBetSweepItem['recommendedAction']; promptTarget: StaleBetSweepItem['promptTarget'] } {
+  if (holder === 'mark-neville') return { recommendedAction: 'ask_holder', promptTarget: 'mark' };
+  if (holder === 'brain') return { recommendedAction: 'resolve', promptTarget: 'brain-maintenance' };
+  return { recommendedAction: 'resolve', promptTarget: 'seb' };
+}
+
 function renderItem(item: StaleBetSweepItem): string {
   return [
     `- ${item.claim}`,
@@ -138,7 +156,11 @@ function renderItem(item: StaleBetSweepItem): string {
     `  age: ${item.ageDays} days`,
     `  ${referenceLabel(item)}`,
     `  source: ${item.pageSlug}#${item.rowNum}`,
-    `  next: resolve / update date / leave active with reason`,
+    `  status: ${item.status}`,
+    `  severity: ${item.wipSeverity}`,
+    `  action: ${item.recommendedAction}`,
+    `  prompt target: ${item.promptTarget}`,
+    `  why now: ${item.whyNow}`,
   ].join('\n');
 }
 
@@ -148,12 +170,13 @@ export function buildBetResolutionSweepReport(
 ): string {
   const options = normalizeOptions(opts);
   const items = findStaleBetSweepItems(takes, options);
-  const holderNames = options.holders.map(h => h.label).join(', ');
+  const holderNames = options.holders.map(h => h.holder).join(', ');
 
   if (items.length === 0) {
     return [
       'Bet-resolution sweep',
-      `No stale unresolved bets across ${holderNames}.`,
+      'Status: GREEN — no stale or decision-breached bets.',
+      `Holders checked: ${holderNames}.`,
     ].join('\n');
   }
 

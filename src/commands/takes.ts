@@ -615,7 +615,7 @@ Subcommands:
                                           Aggregate calibration scorecard (v0.30.0)
   takes calibration [<holder>] [--bucket-size 0.1] [--json]
                                           Calibration curve binned by stated weight (v0.30.0)
-  takes stale-sweep [--holders mark:Mark-holder,seb:Seb-holder,brain:brain-holder]
+  takes stale-sweep [--holders mark-neville:Mark-holder,seb:Seb-holder,brain:brain-holder]
                     [--stale-after-days 7] [--explicit-after-days 14] [--limit 500]
                                           Read-only stale unresolved bet sweep for SOD/EOD context
 
