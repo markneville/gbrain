@@ -142,7 +142,7 @@ export function CalibrationPage() {
         Updated {generatedAgo === 0 ? 'today' : `${generatedAgo}d ago`}
         {profile.published && ' · published'}
         {profile.grade_completion < 0.9 && ` · ~${Math.round(profile.grade_completion * 100)}% graded`}
-        {!profile.voice_gate_passed && ' · voice gate fell back to template'}
+        {!profile.voice_gate_passed && ' · tone gate fell back to template'}
       </div>
 
       <section style={{ marginBottom: 32 }}>

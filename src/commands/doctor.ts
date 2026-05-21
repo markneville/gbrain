@@ -774,17 +774,24 @@ export async function checkVoiceGateHealth(engine: BrainEngine): Promise<Check> 
       };
     }
     const failRate = failures / total;
+    if (total < 3) {
+      return {
+        name: 'voice_gate_health',
+        status: 'ok',
+        message: `Tone gate ${failures}/${total} template fallback(s) in last 7 days; too few recent profiles to warn`,
+      };
+    }
     if (failRate >= 0.3) {
       return {
         name: 'voice_gate_health',
         status: 'warn',
-        message: `Voice gate failed ${failures}/${total} (${Math.round(failRate * 100)}%) in last 7 days. Review src/core/calibration/voice-gate.ts rubric.`,
+        message: `Tone gate fell back ${failures}/${total} times (${Math.round(failRate * 100)}%) in last 7 days. Review src/core/calibration/voice-gate.ts rubric.`,
       };
     }
     return {
       name: 'voice_gate_health',
       status: 'ok',
-      message: `Voice gate ${failures}/${total} failed in last 7 days (${Math.round(failRate * 100)}%)`,
+      message: `Tone gate ${failures}/${total} failed in last 7 days (${Math.round(failRate * 100)}%)`,
     };
   } catch (e) {
     return {

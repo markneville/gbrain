@@ -118,6 +118,15 @@ describe('getLatestProfile', () => {
     expect(profile!.holder).toBe('garry');
   });
 
+  test('normalizes postgres BIGSERIAL bigint id so MCP/CLI JSON can serialize', async () => {
+    const row = { ...buildProfile({ holder: 'garry' }), id: 42n } as unknown as CalibrationProfileRow;
+    const { engine } = buildMockEngine({ rows: [row] });
+    const profile = await getLatestProfile(engine, { holder: 'garry', sourceId: 'default' });
+
+    expect(profile?.id).toBe(42);
+    expect(() => JSON.stringify(profile)).not.toThrow();
+  });
+
   test('returns null when no profile exists', async () => {
     const { engine } = buildMockEngine({ rows: [] });
     const profile = await getLatestProfile(engine, { holder: 'unknown', sourceId: 'default' });
@@ -178,10 +187,11 @@ describe('formatProfileText', () => {
     expect(out).toContain('60% graded');
   });
 
-  test('voice-gate-failed row prints template-fallback note', () => {
+  test('tone-gate-failed row prints template-fallback note without implying audio', () => {
     const p = buildProfile({ holder: 'garry', voice_gate_passed: false, voice_gate_attempts: 2 });
     const out = formatProfileText(p, 'garry');
-    expect(out).toContain('voice gate fell back to template');
+    expect(out).toContain('tone gate fell back to template');
+    expect(out).not.toContain('voice gate');
   });
 
   test('published=true is annotated', () => {

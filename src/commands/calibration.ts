@@ -43,6 +43,13 @@ export interface CalibrationProfileRow {
   model_id: string;
 }
 
+type RawCalibrationProfileRow = Omit<CalibrationProfileRow, 'id'> & { id: number | string | bigint };
+
+function normalizeProfileRow(row: RawCalibrationProfileRow): CalibrationProfileRow {
+  const id = typeof row.id === 'bigint' || typeof row.id === 'string' ? Number(row.id) : row.id;
+  return { ...row, id };
+}
+
 /** Source-scoped read of the latest profile row for a holder. */
 export async function getLatestProfile(
   engine: BrainEngine,
@@ -66,8 +73,9 @@ export async function getLatestProfile(
 
   sql += ` ORDER BY generated_at DESC LIMIT 1`;
 
-  const rows = await engine.executeRaw<CalibrationProfileRow>(sql, params);
-  return rows[0] ?? null;
+  const rows = await engine.executeRaw<RawCalibrationProfileRow>(sql, params);
+  const row = rows[0];
+  return row ? normalizeProfileRow(row) : null;
 }
 
 /** Human format the profile for terminal output. */
@@ -88,7 +96,7 @@ export function formatProfileText(profile: CalibrationProfileRow | null, holder:
     lines.push(`Note: built on ${(profile.grade_completion * 100).toFixed(0)}% graded — partial completion this cycle.`);
   }
   if (!profile.voice_gate_passed) {
-    lines.push(`Note: voice gate fell back to template (${profile.voice_gate_attempts} attempts).`);
+    lines.push(`Note: tone gate fell back to template (${profile.voice_gate_attempts} attempts).`);
   }
   lines.push('');
   lines.push(`Resolved: ${profile.total_resolved} takes`);

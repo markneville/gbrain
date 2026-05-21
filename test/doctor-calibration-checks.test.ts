@@ -9,7 +9,7 @@
  *    stale > 7 days → warn with hint
  *  - checkGradeConfidenceDrift: < 30 applied → ok ("math arrives in v0.37+");
  *    >= 30 → ok placeholder
- *  - checkVoiceGateHealth: 0 in window → ok; high fail rate → warn
+ *  - checkVoiceGateHealth: 0 in window → ok; one fallback → ok; sustained high fail rate → warn
  *  - all checks return status='warn' with diagnostic on executeRaw throw
  */
 
@@ -163,6 +163,17 @@ describe('checkVoiceGateHealth', () => {
     );
     expect(out.status).toBe('ok');
     expect(out.message).toContain('1/10 failed');
+    expect(out.message).toContain('Tone gate');
+    expect(out.message).not.toContain('Voice gate');
+  });
+
+  test('single template fallback in window → ok rather than noisy warning', async () => {
+    const out = await checkVoiceGateHealth(
+      buildMockEngine({ voiceTotal: 1, voiceFailures: 1 }),
+    );
+    expect(out.status).toBe('ok');
+    expect(out.message).toContain('1/1 template fallback');
+    expect(out.message).toContain('too few recent profiles to warn');
   });
 
   test('30%+ fail rate → warn with rubric-review hint', async () => {
@@ -171,7 +182,9 @@ describe('checkVoiceGateHealth', () => {
     );
     expect(out.status).toBe('warn');
     expect(out.message).toContain('4/10');
+    expect(out.message).toContain('Tone gate');
     expect(out.message).toContain('voice-gate.ts');
+    expect(out.message).not.toContain('Voice gate');
   });
 
   test('engine throw → warn with diagnostic', async () => {
