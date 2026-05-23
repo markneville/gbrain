@@ -3,7 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runThink, persistSynthesis, type ThinkLLMClient } from '../src/core/think/index.ts';
 import { sanitizeTakeForPrompt, renderTakesBlock } from '../src/core/think/sanitize.ts';
 import { resolveCitations, parseInlineCitations, normalizeStructuredCitations } from '../src/core/think/cite-render.ts';
-import { runGather } from '../src/core/think/gather.ts';
+import { runGather, renderPagesBlock } from '../src/core/think/gather.ts';
 
 let engine: PGLiteEngine;
 let alicePageId: number;
@@ -136,6 +136,36 @@ describe('runGather', () => {
   test('honors takesHoldersAllowList filter', async () => {
     const r = await runGather(engine, { question: 'founder', takesHoldersAllowList: ['world'] });
     expect(r.takes.every(h => h.holder === 'world')).toBe(true);
+  });
+
+  test('pins anchor page content even when question would not retrieve it', async () => {
+    const r = await runGather(engine, {
+      question: 'completely unrelated retainer offer question',
+      anchor: 'people/alice-example',
+    });
+    expect(r.pages[0].slug).toBe('people/alice-example');
+    expect(r.pages[0].chunk_text).toContain('Alice founded Acme.');
+    expect(r.graphSlugs).toContain('people/alice-example');
+  });
+
+  test('renders pinned anchor page beyond normal excerpt cap', async () => {
+    const anchor = await engine.putPage('notes/long-anchor', {
+      title: 'Long Anchor', type: 'note', compiled_truth: `${'intro '.repeat(150)}ACTIONABLE_MARKER`,
+    });
+    const rendered = renderPagesBlock([{
+      slug: anchor.slug,
+      page_id: anchor.id,
+      title: anchor.title,
+      type: anchor.type,
+      chunk_text: anchor.compiled_truth,
+      chunk_source: 'compiled_truth',
+      chunk_id: -1,
+      chunk_index: -1,
+      score: 1,
+      stale: false,
+      source_id: anchor.source_id,
+    }], 600);
+    expect(rendered).toContain('ACTIONABLE_MARKER');
   });
 });
 

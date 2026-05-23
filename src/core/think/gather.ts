@@ -135,7 +135,41 @@ export async function runGather(
       })
     : Promise.resolve([] as TakeHit[]);
 
-  // Stream 4: graph walk (anchor only).
+  // Stream 4: anchor page (anchor only).
+  //
+  // v0.40.2.1 local fix: graph traversal includes the anchor slug but not the
+  // anchor page body. If the free-text question doesn't independently rank the
+  // anchor page in hybrid search, synthesis sees a graph node with no content
+  // and falsely reports "no data for anchor". Pull the anchor page explicitly
+  // and pin it at the top of the page evidence block.
+  const anchorPagePromise: Promise<SearchResult[]> = opts.anchor
+    ? engine.getPage(opts.anchor)
+        .then(page => {
+          if (!page) return [] as SearchResult[];
+          const chunkText = page.compiled_truth || page.timeline || '';
+          return [{
+            slug: page.slug,
+            page_id: page.id,
+            title: page.title,
+            type: page.type,
+            chunk_text: chunkText,
+            chunk_source: page.compiled_truth ? 'compiled_truth' : 'timeline',
+            chunk_id: -1,
+            chunk_index: -1,
+            score: 1,
+            stale: false,
+            source_id: page.source_id,
+            effective_date: page.effective_date ? page.effective_date.toISOString().slice(0, 10) : null,
+            effective_date_source: page.effective_date_source ?? null,
+          } satisfies SearchResult];
+        })
+        .catch((e) => {
+          process.stderr.write(`[think.gather] anchor-page stream failed: ${(e as Error).message}\n`);
+          return [] as SearchResult[];
+        })
+    : Promise.resolve([] as SearchResult[]);
+
+  // Stream 5: graph walk (anchor only).
   const graphPromise: Promise<string[]> = opts.anchor
     ? engine.traversePaths(opts.anchor, { depth: graphDepth, direction: 'both' })
         .then(paths => {
@@ -152,9 +186,15 @@ export async function runGather(
         })
     : Promise.resolve([] as string[]);
 
-  const [pages, takesKw, takesVec, graphSlugs] = await Promise.all([
-    pagesPromise, takesKwPromise, takesVecPromise, graphPromise,
+  const [pages, takesKw, takesVec, anchorPages, graphSlugs] = await Promise.all([
+    pagesPromise, takesKwPromise, takesVecPromise, anchorPagePromise, graphPromise,
   ]);
+
+  const anchorPageKeys = new Set(anchorPages.map(p => `${p.source_id ?? 'default'}:${p.slug}`));
+  const pagesWithAnchor = [
+    ...anchorPages,
+    ...pages.filter(p => !anchorPageKeys.has(`${p.source_id ?? 'default'}:${p.slug}`)),
+  ].slice(0, gatherLimit);
 
   // Fuse takes streams (keyword + vector). Key by (page_slug, row_num).
   const fusedTakes = fuseRanked(
@@ -163,7 +203,7 @@ export async function runGather(
   ).slice(0, takesLimit);
 
   return {
-    pages: pages.slice(0, gatherLimit),
+    pages: pagesWithAnchor,
     takes: fusedTakes,
     graphSlugs,
     diagnostics: {
@@ -184,12 +224,14 @@ export async function runGather(
 export function renderPagesBlock(pages: SearchResult[], excerptLen = 600): string {
   return pages.map((p, idx) => {
     const slug = String((p as unknown as { slug?: string }).slug ?? '');
+    const isPinnedAnchorPage = Number((p as unknown as { chunk_id?: number }).chunk_id ?? 0) < 0;
+    const maxExcerptLen = isPinnedAnchorPage ? Math.max(excerptLen, 6000) : excerptLen;
     const excerpt = String(
       (p as unknown as { compiled_truth?: string; chunk_text?: string; snippet?: string }).chunk_text
       ?? (p as unknown as { compiled_truth?: string }).compiled_truth
       ?? (p as unknown as { snippet?: string }).snippet
       ?? '',
-    ).slice(0, excerptLen);
+    ).slice(0, maxExcerptLen);
     return `<page slug="${slug}" rank="${idx + 1}">\n${excerpt}\n</page>`;
   }).join('\n\n');
 }
