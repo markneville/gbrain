@@ -30,6 +30,10 @@ export interface ThinkGatherOpts {
   takesLimit?: number;
   /** Graph traversal depth when anchor is set. Default 2. */
   graphDepth?: number;
+  /** Restrict gather to a single source. */
+  sourceId?: string;
+  /** Restrict gather to any of these sources. Takes precedence over sourceId. */
+  sourceIds?: string[];
   /** Optional pre-computed embedding for the question. Lets the caller share embedding cost. */
   questionEmbedding?: Float32Array;
   /** When set, MCP-bound calls forward this allow-list to takes_search. Local CLI leaves unset. */
@@ -110,6 +114,8 @@ export async function runGather(
   const pagesPromise = hybridSearch(engine, opts.question, {
     limit: gatherLimit,
     expansion: false,  // think provides its own anchor + graph context; no need for re-expansion
+    sourceId: opts.sourceId,
+    sourceIds: opts.sourceIds,
   }).catch((e) => {
     process.stderr.write(`[think.gather] hybrid stream failed: ${(e as Error).message}\n`);
     return [] as SearchResult[];
@@ -118,6 +124,8 @@ export async function runGather(
   // Stream 2: keyword search across takes.
   const takesKwPromise = engine.searchTakes(opts.question, {
     limit: takesLimit,
+    sourceId: opts.sourceId,
+    sourceIds: opts.sourceIds,
     takesHoldersAllowList: opts.takesHoldersAllowList,
   }).catch((e) => {
     process.stderr.write(`[think.gather] takes-keyword stream failed: ${(e as Error).message}\n`);
@@ -128,6 +136,8 @@ export async function runGather(
   const takesVecPromise: Promise<TakeHit[]> = opts.questionEmbedding
     ? engine.searchTakesVector(opts.questionEmbedding, {
         limit: takesLimit,
+        sourceId: opts.sourceId,
+        sourceIds: opts.sourceIds,
         takesHoldersAllowList: opts.takesHoldersAllowList,
       }).catch((e) => {
         process.stderr.write(`[think.gather] takes-vector stream failed: ${(e as Error).message}\n`);
@@ -143,7 +153,7 @@ export async function runGather(
   // and falsely reports "no data for anchor". Pull the anchor page explicitly
   // and pin it at the top of the page evidence block.
   const anchorPagePromise: Promise<SearchResult[]> = opts.anchor
-    ? engine.getPage(opts.anchor)
+    ? engine.getPage(opts.anchor, opts.sourceId ? { sourceId: opts.sourceId } : undefined)
         .then(page => {
           if (!page) return [] as SearchResult[];
           const chunkText = page.compiled_truth || page.timeline || '';
@@ -171,7 +181,7 @@ export async function runGather(
 
   // Stream 5: graph walk (anchor only).
   const graphPromise: Promise<string[]> = opts.anchor
-    ? engine.traversePaths(opts.anchor, { depth: graphDepth, direction: 'both' })
+    ? engine.traversePaths(opts.anchor, { depth: graphDepth, direction: 'both', sourceId: opts.sourceId, sourceIds: opts.sourceIds })
         .then(paths => {
           const slugs = new Set<string>([opts.anchor!]);
           for (const p of paths) {

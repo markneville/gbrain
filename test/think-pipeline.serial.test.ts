@@ -167,6 +167,29 @@ describe('runGather', () => {
     }], 600);
     expect(rendered).toContain('ACTIONABLE_MARKER');
   });
+
+  test('source-scopes page gather and pinned anchor content', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('private-health', 'private-health') ON CONFLICT DO NOTHING`,
+    );
+    await engine.putPage('notes/default-leak', {
+      title: 'Default Leak', type: 'note', compiled_truth: 'DEFAULT_LEAK_MARKER',
+    });
+    await engine.putPage('notes/private-health-anchor', {
+      title: 'Private Health Anchor', type: 'note', compiled_truth: 'PRIVATE_HEALTH_MARKER',
+    }, { sourceId: 'private-health' });
+
+    const r = await runGather(engine, {
+      question: 'DEFAULT_LEAK_MARKER PRIVATE_HEALTH_MARKER',
+      anchor: 'notes/private-health-anchor',
+      sourceId: 'private-health',
+    });
+
+    expect(r.pages.length).toBeGreaterThan(0);
+    expect(r.pages.every(p => p.source_id === 'private-health')).toBe(true);
+    expect(r.pages.some(p => p.chunk_text.includes('PRIVATE_HEALTH_MARKER'))).toBe(true);
+    expect(r.pages.some(p => p.chunk_text.includes('DEFAULT_LEAK_MARKER'))).toBe(false);
+  });
 });
 
 describe('runThink (with stub client)', () => {

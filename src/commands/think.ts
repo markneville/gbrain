@@ -9,6 +9,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { runThink, persistSynthesis } from '../core/think/index.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
+import { resolveSourceId } from '../core/source-resolver.ts';
 
 function flagValue(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -30,6 +31,7 @@ Options:
   --save                   Persist a synthesis page under synthesis/<slug>-<date>.md
   --take                   Append a take row to the anchor page (requires --anchor)
   --model <name>           Override the model (alias or full id)
+  --source <id>            Restrict retrieval to one source (default resolution honors GBRAIN_SOURCE)
   --since YYYY-MM-DD       Start of temporal window
   --until YYYY-MM-DD       End of temporal window
   --json                   Output as JSON
@@ -45,7 +47,7 @@ the gather phase still runs and prints what would have been the input.
   }
 
   // Strip flags from positional args
-  const flagNames = ['--anchor', '--rounds', '--model', '--since', '--until'];
+  const flagNames = ['--anchor', '--rounds', '--model', '--source', '--since', '--until'];
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -66,6 +68,7 @@ the gather phase still runs and prints what would have been the input.
   const roundsStr = flagValue(args, '--rounds');
   const rounds = roundsStr ? Math.max(1, parseInt(roundsStr, 10) || 1) : 1;
   const model = flagValue(args, '--model');
+  const sourceFlag = flagValue(args, '--source');
   const since = flagValue(args, '--since');
   const until = flagValue(args, '--until');
   // v0.36.1.0 (E1, D22) — anti-bias rewrite mode. Off by default (no
@@ -73,6 +76,7 @@ the gather phase still runs and prints what would have been the input.
   // profile gets injected per D22 placement (after retrieval, before question).
   const withCalibration = flagPresent(args, '--with-calibration');
   const calibrationHolder = flagValue(args, '--calibration-holder');
+  const sourceId = await resolveSourceId(engine, sourceFlag ?? null);
 
   if (take && !anchor) {
     console.error('--take requires --anchor (the take row needs a target page)');
@@ -104,6 +108,7 @@ the gather phase still runs and prints what would have been the input.
   } else {
     result = await runThink(engine, {
       question, anchor, rounds, save, take, model, since, until,
+      sourceId,
       // v0.36.1.0 (E1) — opt-in anti-bias rewrite. Falls back to baseline
       // think when no profile exists, with NO_CALIBRATION_PROFILE warning.
       withCalibration,

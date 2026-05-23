@@ -3412,6 +3412,10 @@ export class PostgresEngine implements BrainEngine {
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
+        AND (
+          (${opts.sourceIds ?? null}::text[] IS NOT NULL AND p.source_id = ANY(${opts.sourceIds ?? null}::text[]))
+          OR (${opts.sourceIds ?? null}::text[] IS NULL AND (${opts.sourceId ?? null}::text IS NULL OR p.source_id = ${opts.sourceId ?? null}))
+        )
       ORDER BY score DESC, t.weight DESC
       LIMIT ${limit}
     `;
@@ -3436,6 +3440,10 @@ export class PostgresEngine implements BrainEngine {
         AND (
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
+        )
+        AND (
+          (${opts.sourceIds ?? null}::text[] IS NOT NULL AND p.source_id = ANY(${opts.sourceIds ?? null}::text[]))
+          OR (${opts.sourceIds ?? null}::text[] IS NULL AND (${opts.sourceId ?? null}::text IS NULL OR p.source_id = ${opts.sourceId ?? null}))
         )
       ORDER BY t.embedding <=> ${vec}::vector
       LIMIT ${limit}
