@@ -56,6 +56,10 @@ const CLI_ONLY_SELF_HELP = new Set([
   // the generic short-circuit so the destructive-action warning text
   // reaches the user.
   'reinit-pglite',
+  // v0.40.6.0 Schema Cathedral v3 — `gbrain schema --help` should hit
+  // schema.ts printHelp() with the full 22+ verb taxonomy, not the
+  // generic short-circuit's one-line stub.
+  'schema',
 ]);
 
 async function main() {
@@ -573,6 +577,15 @@ function formatResult(opName: string, result: unknown): string {
     case 'query': {
       const results = result as any[];
       if (results.length === 0) return 'No results.\n';
+      // v0.40.4 — --explain switches to per-stage attribution formatter.
+      // Reads CliOptions.explain via the module-level singleton.
+      const cliOpts = getCliOptions();
+      if (cliOpts.explain) {
+        // Lazy import keeps formatResult's startup hot path narrow for
+        // the common non-explain case.
+        const { formatResultsExplain } = require('./core/search/explain-formatter.ts');
+        return formatResultsExplain(results);
+      }
       return results.map(r =>
         `[${r.score?.toFixed(4) || '?'}] ${r.slug} -- ${r.chunk_text?.slice(0, 100) || ''}${r.stale ? ' (stale)' : ''}`,
       ).join('\n') + '\n';

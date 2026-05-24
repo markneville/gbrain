@@ -2,6 +2,676 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.40.8.1] - 2026-05-23
+
+**The README and tutorials are rewritten for someone who has never touched GBrain.** The front-door docs now read as a story you can understand cold: what GBrain does, what it looks like, how to install it, two real walkthroughs that take you from zero to a working brain. No internal jargon, no version archaeology, no assumed context.
+
+The big rewrite covers:
+
+- **README lead** rewritten in first-person voice. Opens with "Search gives you raw pages. GBrain gives you the answer." Frames GBrain as both a personal brain and a company brain, with a link to YC's company-brain Request for Startups.
+- **"What this looks like" section** is now a concrete meeting-prep scenario any professional gets cold: you ask "what do I need to know before my meeting with Alice tomorrow?", you see what a typical retrieval tool returns (a list of 5 pages), you see what GBrain returns (a synthesized briefing with citations and a gap-analysis note). No eval jargon, no judge scores, just the two answers side by side. Closes with "search finds the pages, the brain reads them for you and writes the answer."
+- **New `## Tutorials` section** in the README. Replaces the prior `## Recent Releases` changelog summary (that lives in this file, where it belongs).
+- **New `## Your brain's shape (schema packs)` section** in the README explains the dynamic-schema cathedral in plain English: drop your Notion export or your custom layout, run `gbrain schema detect`, the brain adapts to your shape instead of forcing you to learn its.
+- **All version chatter stripped from the README body.** Per the iron rule "the README should read as the current docs written for people who have never known GBrain before." Version history belongs in this file.
+
+Two new end-to-end tutorials in `docs/tutorials/`:
+
+- **`personal-brain.md`** — the canonical full-stack solo install. Two GitHub repos, a Telegram bot, AlphaClaw on Render, OpenClaw + GBrain + Supabase. About two hours, $100-$150 a month. Includes the three Supabase gotchas every install hits (turn on the `vector` extension, use the connection pooler not the direct connection, buy the IPv4 add-on).
+- **`company-brain.md`** — extends the personal brain into a multi-user shared brain for a 10-50 person team. Federated sources with OAuth-scoped per-user reads, per-person folder conventions, per-person crons, per-person skills, the Slack integration callout (two-cron architecture, channel-to-task-ID mapping, deterministic links, dismissed-items state), and the botmaster onboarding pattern (pre-populate each teammate's slice → walk them through 2-3 wow flows → graduate them to DM only after the wow moment lands).
+- New tutorial-roadmap index at `docs/tutorials/README.md` listing what shipped and what's planned (connect-your-agent, VC dealflow brain, vault migration, code brain, fully-local brain, dream-cycle setup).
+
+Cross-linked from the relevant architecture docs (`docs/INSTALL.md` for the install-path readers, `docs/architecture/topologies.md` for the design-doc readers).
+
+`bun run build:llms` regenerated to pick up the doc structure changes.
+
+### Itemized changes
+
+- `README.md` — first-person lead rewritten; "Search vs Think" section retitled "Two ways to query your brain" (think is a CLI verb, not a brand); company-brain framing paragraph added with YC RFS link; Tutorials section added; `## Your brain's shape (schema packs)` section added; `## Recent Releases` section removed (changelog summary belongs in CHANGELOG.md); all `(v0.X+)` version cites stripped from body; proper-noun capitalization sweep (`alice` → `Alice` in prose, slug forms unchanged); the visceral before/after example rewritten as a universal meeting-prep scenario with zero internal jargon.
+- `docs/tutorials/personal-brain.md` (new) — solo install walkthrough sourced from the live setup session notes. ~2000 words. Includes the three Supabase gotchas (pgvector, connection pooler, IPv4 add-on) in their own subsection.
+- `docs/tutorials/company-brain.md` (new) — multi-user walkthrough, restructured as a true superset of personal-brain (no duplicated install steps). ~5000 words. Covers two scoping models (separate sources with OAuth scoping vs `partners/<slug>/` directory convention in one source), shared rule files at the skills root (`_brain-filing-rules.md`, `_excluded-people.md`, `_output-rules.md`), Slack wiring conventions, and the botmaster onboarding pattern.
+- `docs/tutorials/README.md` (new) — tutorial-roadmap index page.
+- `docs/INSTALL.md` — pointer to the company-brain tutorial in the shared/multi-machine deployment section.
+- `docs/architecture/topologies.md` — pointer to the tutorials directory in the "See also" section.
+- `docs/ethos/ORIGIN.md` — closing paragraph naming the synthesis layer as the reason the brain is worth building.
+- `llms-full.txt` + `llms.txt` — regenerated.
+
+## [0.40.8.0] - 2026-05-23
+
+**Your doctor checks, your operations trust boundary, and your cycle phases now have real behavioral tests — not just source-grep guards.**
+
+Before this release, three of gbrain's load-bearing surfaces shipped with structural tests only: the 50+ doctor checks were verified by grepping source code for check names; the 74 MCP operations were checked for scope annotations but no test proved that `localOnly: true` actually keeps an op off the HTTP wire; and the cycle phases that compose the maintenance loop had no test pinning their result-mapping (counter → status enum). When a refactor accidentally dropped a check or flipped a localOnly flag, the existing tests stayed green. The v0.38.2.0 partial-scan wave was one example — a render bug slipped through because no test drove the doctor orchestrator end-to-end.
+
+This wave adds the missing behavioral coverage. `gbrain doctor --json` now has a subprocess smoke test that runs the full render path against a fresh PGLite tempdir brain and asserts the schema_version=2 envelope, the status enum, and the check list integrity. The doctor's check-building logic was extracted into a small `buildChecks` function so behavioral tests can drive it directly without `process.exit` getting in the way — the wrapper still handles all 10 process.exit sites unchanged, snapshot-pinned so accidental check drop-outs fail loudly at PR review time. The operations trust-boundary surface gets a table-driven contract test over all 74 ops plus targeted handler-invocation regressions for the three historically-broken classes (HTTP MCP shell-job RCE, search_by_image image_path leak, plus the lint contract that file_upload's strict-mode confinement holds). A new shell guard in the `bun run verify` chain catches any future HTTP-exposing module that imports the operations list without applying the `localOnly` filter — the bypass that motivated the v0.26.9 hardening pass.
+
+Two pre-existing master-test flakes get root-caused as part of the same wave: `test/ai/gateway.test.ts` was leaking `OPENAI_API_KEY=openai-fake` into the gateway's module-scoped state, poisoning sibling tests in the same shard that called real `embed()` paths (afterAll cleanup added); and `test/ai/header-transport.test.ts` raced its synthetic recipe registration with sibling files that also mutated the gateway, returning `'[]'` instead of `'ok'` under shard parallelism (file quarantined as `.serial.test.ts`). Neither was a regression from this branch — both were latent bugs that surfaced because the new fast-loop coverage exercised more of the surface concurrently.
+
+### How to take advantage of v0.40.8.0
+
+The added coverage is invisible at runtime. There's nothing to enable or configure — your next `bun run test` already includes 39 new test cases pinning the doctor, operations, and cycle contracts. If you've been wondering whether to trust `gbrain doctor`'s output after a refactor, the new behavioral tests are now the answer.
+
+If you maintain a downstream gbrain fork or extension that imports from `core/operations.ts`, run `bun run check:operations-filter-bypass` once. It'll catch any of your modules that brought the `operations` value in without applying the canonical `.filter(op => !op.localOnly)` filter — three import shapes are detected (destructured, aliased, namespace).
+
+### Itemized changes
+
+#### Doctor refactor (no behavior change, full coverage)
+
+- **`src/commands/doctor.ts:1604` — extract `buildChecks(engine, args, dbSource): Promise<Check[]>` from `runDoctor`.** The check-building logic moves into the new exported function; the existing exported `computeDoctorReport(checks)` at line 78 stays untouched. `runDoctor` is now a thin wrapper: `buildChecks → computeDoctorReport → render + process.exit`. All 10 `process.exit` sites stay where they are (lines 2199, 2220, the 5 inside `--locks` mode, and the remediation subcommands). The two early-return paths (no engine, connection failure) drop their inline `outputResults + process.exit` calls and `return checks` instead — the wrapper still produces identical observable output because both render the same partial check list.
+
+- **`test/doctor-behavioral.test.ts` (new, 13 cases).** Drives `buildChecks` against PGLite. Pure pure-aggregation cases pin `computeDoctorReport` math: 1 fail → -20 points, 3 fails → -60, mixed ok+warn+fail → unhealthy with the fail outcome dominating, score clamped at 0. Orchestrator cases assert `--fast` flag honors the skip set, `--json` arg doesn't alter the check list, the no-engine path returns a partial list without calling `process.exit`, and the snapshot of load-bearing check names (`connection`, `schema_version`, `brain_score`, `sync_freshness`, `search_mode`, `eval_drift`, `reranker_health`, `embedding_width_consistency`, `autopilot_lock_scope`) catches any accidental check drop-out during future refactors.
+
+- **`test/doctor-cli-smoke.serial.test.ts` (new, 1 case).** Subprocess smoke spawning `bun run src/cli.ts doctor --json` against a fresh PGLite tempdir brain via `GBRAIN_HOME=$(mktemp -d)`. Asserts exit code 0 on a freshly-initialized brain, the JSON envelope parses, `schema_version === 2`, `status` is one of `healthy`/`warnings`/`unhealthy`, and `checks` is a non-empty array. Catches render-path bugs that buildChecks-only tests miss — the class the v0.38.2.0 partial-scan wave exposed. Skip via `GBRAIN_SKIP_SUBPROCESS_TESTS=1` for shard-time control; quarantined as `.serial.test.ts` because PGLite write-locks don't play well with parallel runners.
+
+#### Operations trust-boundary contract
+
+- **`test/operations-trust-boundary.test.ts` (new, 14 cases).** Hybrid design: pure assertions over all 74 ops cover the cheap drift-detection win (every op has a scope annotation; every mutating op has a non-read scope; scope is one of the documented enum values; `hasScope(['read'], op.scope)` correctly rejects when op.scope is 'admin' or 'write'). Plus the canonical filter contract: every `localOnly: true` op is excluded from `operations.filter(op => !op.localOnly)`. Plus targeted handler-invocation cases for the two historically-broken HTTP-callable classes: `submit_job` with `name='shell'` + `ctx.remote=true` MUST reject (the F7b HTTP MCP shell-job RCE class), and `search_by_image` with `image_path` + `ctx.remote=true` MUST reject (the D18 P0 image-leak class). `file_upload` and `sync_brain` are deliberately omitted from handler-invocation tests because they're `localOnly: true` — calling their handlers directly would test an impossible production path (codex CMT-3 caught this during plan review). The seven historically-sensitive `localOnly` ops are snapshot-pinned by name: `sync_brain`, `file_upload`, `file_list`, `file_url`, `purge_deleted_pages`, `get_recent_transcripts`, `code_traversal_cache_clear`.
+
+- **`scripts/check-operations-filter-bypass.sh` (new shell guard, wired into `bun run verify`).** Greps `src/` for any module that imports the `operations` value from `core/operations.ts` outside the canonical filter site at `src/commands/serve-http.ts`. Three import shapes are detected: destructured (`import { operations }`), aliased (`import { operations as ops }`), and namespace (`import * as opsModule`). An explicit allow-list of 10 known-safe importers (CLI, dispatch, stdio MCP, the older http-transport, the tool-def helper, the subagent registry, three CLI tools, and serve-http itself) is documented with a one-line rationale per entry. Plus a check that `serve-http.ts` still contains the literal `operations.filter(op => !op.localOnly)` expression — refactoring it out fails the build. Type-only imports of sibling exports like `sourceScopeOpts` and `OperationContext` are deliberately not flagged.
+
+#### Cycle phase wrappers
+
+- **`src/core/cycle.ts:518, 552` — export `runPhaseLint` + `runPhaseBacklinks`.** Adds the `export` keyword to two existing phase functions so behavioral tests can drive them directly. No body changes; no behavior change. Documented as internal helpers exposed for test-only consumption — downstream code should NOT take a dependency on them.
+
+- **`test/cycle-legacy-phases.test.ts` (new, 11 cases).** Combined file with two `describe` blocks for `runPhaseLint` + `runPhaseBacklinks`. Narrowed to result-mapping + error envelope per codex CMT-1 (the legacy phases don't extend `BaseCyclePhase` and don't take a progress reporter or AbortSignal directly, so the contract surface they actually have is the counter → status enum mapping plus the try/catch error envelope). Cases: clean run → status='ok' with summary format, partial fix → status='warn' with `dryRun` in details, dry-run path doesn't write, throw-from-lib → status='fail' with the wrapper's try/catch envelope populated (verified that the throw doesn't escape). Future phase wrappers (sync, extract, embed, orphans, extract_facts, resolve_symbol_edges, recompute_emotional_weight) land as additional describes here, not as new files.
+
+#### Pre-existing master flakes — root-cause fixes (not bandaids)
+
+- **`test/ai/gateway.test.ts` — add `afterAll(() => resetGateway())` cleanup hook.** The file's tests each call `beforeEach(() => resetGateway())` so per-test pollution within the file was handled. But the file's LAST test set `configureGateway({env: {OPENAI_API_KEY: 'openai-fake'}})` and left that state in the gateway module. Other test files in the same bun shard (notably `test/ingestion/ingest-capture.test.ts`) then called code paths that triggered `embed()` without first calling `configureGateway`, hit the real OpenAI endpoint with the leaked fake key, and returned `Incorrect API key provided: openai-fake`. The shard wedged. One-line fix at file teardown stops the leak.
+
+- **`test/ai/header-transport.serial.test.ts` — quarantined from the parallel fast loop (renamed from `header-transport.test.ts`).** The file mutates `RECIPES` (the gateway's module-scoped recipe map) and `configureGateway` to register synthetic recipes, then asserts that `fakeChatFetch` was invoked. Under bun's intra-shard parallelism, sibling files like `test/ai/rerank.test.ts` and `test/gateway-embed-model-override.test.ts` race the same gateway state — the chat test would see `result.text === '[]'` instead of `'ok'` because a parallel test called `resetGateway` between this test's `configureGateway` and its `chat` call. The `.serial.test.ts` rename moves the file out of the parallel pass into the serial-after pass at `--max-concurrency=1` per repo convention.
+
+### Honest notes
+
+Three of the original 10 audit gaps turned out to be non-gaps after surveying the actual repo state — `test/ingestion/{dedup,daemon,skillpack-load}.test.ts` and `test/phantom-redirect.test.ts` already existed with thorough coverage (88 ingestion tests, 38 phantom-redirect tests, all green). The audit was based on stale information. The four real gaps (doctor behavioral, cycle phase wrappers, operations trust-boundary contract, shell guard for HTTP filter) all shipped.
+
+Four follow-up TODOs filed (in the plan file, not TODOS.md yet):
+- NEW-1: per-check leaf unit tests for the 20+ exported doctor check functions (codex CMT-2 deep fix)
+- NEW-2: cycle-phase wrappers for the other 7 phases (sync, extract, embed, orphans, extract_facts, resolve_symbol_edges, recompute_emotional_weight)
+- NEW-3: HTTP-level trust-boundary E2E that proves serve-http.ts honors the localOnly filter at runtime (codex CMT-3 strongest defense)
+- NEW-4: render function extraction from runDoctor (would let doctor-cli-smoke move back into the parallel fast loop)
+## [0.40.7.2] - 2026-05-23
+
+**TODOS.md gets a wave-commitments register at the top.** A `/plan-ceo-review` + `/plan-eng-review` pass clustered the 110 open TODOs into 12 feature themes, articulated the platonic ideal for each, and surfaced three strategic decisions. All three landed on the most ambitious option, and the seven verified-absent items the analysis caught got filed. Nothing in `src/` changed.
+
+The new top section in TODOS.md is the canonical register for the next wave; the rest of the file is unchanged. Plan analysis at `~/.claude/plans/system-instruction-you-are-working-dazzling-pnueli.md` documents the cluster taxonomy + methodology caveats + 7 grep-verified missing items.
+
+## To take advantage of v0.40.7.2
+
+No action required — this is a docs-only release. The wave commitments below land in TODOS.md and inform what `v0.41` and `v0.42` ship. Merged into master after v0.40.7.0 (Schema Cathedral v3); bumped from 0.40.6.1 to 0.40.7.2 to clear the queue.
+
+### Itemized changes
+
+#### TODOS register at top of TODOS.md
+
+- **D1 — v0.41 Eval-loop wave (3× P0):** `gbrain eval gate <baseline>` CI verb (the single most load-bearing missing item across all 12 clusters), contributor-mode eval capture ON by default with airtight privacy, wire nightly quality probe into autopilot scheduler. Substrate is 80% built; the LOOP is 10% wired. These three close the loop.
+- **D2 — Code-indexing promoted to P1 (5 items):** `.sql` file indexing (#1173), Magika auto-detect for extension-less files, full `doc_comment` extraction at chunk time, cross-file edge resolution (Layer 5 precision), code-signature retrieval (per-language). gbrain commits to peer-of-Cursor/Sourcegraph posture.
+- **D3 — v0.42 Non-Latin script wave (5 items):** Postgres CJK FTS via pgroonga/zhparser, widen CJK ranges to Unicode property escapes, CJK-aware overlap context in chunker, Thai/Arabic/Cyrillic/Devanagari support, `git diff --name-status -z` NUL framing. gbrain commits to global-by-design.
+- **Verified-missing items (8):** `gbrain sources promote`, `--explain` auto-on during `gbrain eval replay`, extend `gbrain remote doctor` to stream audit JSONL, new `gbrain costs` command, `gbrain jobs explain <id>`, `docs/security/threat-model.md` catalog, `gbrain doctor --thin-client` parity probe, `gbrain models migrate`. Each grep-verified absent before filing.
+
+Five items duplicate older entries lower in TODOS.md (`.sql` indexing, Magika, doc_comment, CJK items) — duplication noted inline. The new top section is the canonical wave-commitment register; historical entries stay as detail.
+## [0.40.7.0] - 2026-05-23
+
+**Your agents can now author your brain's schema pack themselves — no more shell-out, no more hand-editing YAML.** If you've ever opened `gbrain` and noticed thousands of pages stuck as untyped "notes" under `meetings/` or `research/`, this release closes that loop. Tell Wintermute (or any agent connected via MCP) "my brain has 4000 untyped meetings pages — add a `meeting` type and backfill them," and it does the whole thing safely: locks the pack file so two agents can't race, validates the change won't create dangling references, writes atomically so a crash never leaves the pack half-written, audits the mutation with the agent's identity, then updates every matching page in 1000-row batches that never wedge concurrent writers. The cathedral that was bundled but unreachable in v0.39 is now reachable from the outside.
+
+This release rebuilds the design from a closed community PR ([#1321](https://github.com/garrytan/gbrain/pull/1321)) by `@garrytan-agents` into a production-grade `gbrain schema` cathedral. The four mutation verbs that PR proposed (`add-type`, `remove-type`, `stats`, `sync`) all ship — hardened with atomic+locked+audited writes, pack-aware fallback semantics that fail loud instead of silently re-introducing types you removed, and a batched MCP op (`schema_apply_mutations`) that lets a remote agent compose multi-step refactors as one atomic transaction. The lint surface grew from 2 rules to 11. The graph visualization renders link verbs. And the agent on-ramp story — RESOLVER routing, a `schema-author` skill with explicit boundary callouts to `brain-taxonomist` and `eiirp`, a `conventions/schema-evolution.md` decision tree for "when to add a type vs alias vs prefix" — means agents will actually FIND this surface instead of inventing their own ad-hoc YAML edits.
+
+## To take advantage of v0.40.7.0
+
+`gbrain upgrade` handles this automatically. To verify after upgrade:
+
+```bash
+# 1. See your active pack identity:
+gbrain schema active --json
+
+# 2. Coverage check — how many pages are typed?
+gbrain schema stats --json
+
+# 3. Try the agent journey: fork the bundled pack, add a custom type,
+#    backfill existing pages, verify the wiring works:
+gbrain schema fork gbrain-base mine
+gbrain schema use mine
+gbrain schema add-type researcher --primitive entity --prefix people/researchers/ --extractable --expert
+gbrain schema lint --with-db   # validates against your DB
+gbrain schema sync --apply     # backfills page.type on matching pages
+gbrain whoknows "machine learning"   # researcher-typed pages now route through expert routing
+
+# 4. If you run `gbrain serve --http` for remote MCP, register a client
+#    with admin scope so Wintermute or any other agent can author packs remotely:
+gbrain auth register-client wintermute --scopes admin
+```
+
+If any step fails or numbers look wrong, please file an issue with the output of `gbrain doctor` and `tail -20 ~/.gbrain/audit/schema-mutations-*.jsonl` so we can debug the mutation chain.
+
+### Itemized changes
+
+**New CLI verbs (`gbrain schema *` — 14 new):**
+- `add-type <name> --primitive P --prefix dir/` — append a page type with primitive, prefix, optional `--extractable`, `--expert`, `--alias`.
+- `remove-type <name>` — atomic remove with cross-reference check. If the type is referenced by another type's `aliases`, `enrichable_types`, `link_types`, or `frontmatter_links`, the remove fails loud with the reference list (codex C14 fix from `/plan-eng-review`).
+- `update-type <name> [--extractable BOOL] [--expert BOOL] [--primitive P]` — patch a type's flags without re-creating it.
+- `add-alias <type> <alias>` / `remove-alias <type> <alias>` — atomic single-alias edits.
+- `add-prefix <type> <prefix>` / `remove-prefix <type> <prefix>` — atomic single-prefix edits.
+- `add-link-type <name> [--inverse V] [--page-type T] [--target-type T]` — create new link verbs (e.g. `authored`, `attended`) with inference rules.
+- `remove-link-type <name>` — refuses if any `frontmatter_links` references it.
+- `set-extractable <type> <true|false>` / `set-expert-routing <type> <true|false>` — one-shot flag toggles.
+- `stats [--source <id>]` — per-type page counts + coverage % + dead-prefix detection (declared prefixes with zero matching pages). Multi-source aware.
+- `sync [--apply] [--source <id>]` — backfill `page.type` for rows matching pack prefixes. Dry-run by default; chunked UPDATE in 1000-row batches on `--apply` so concurrent writers never wait.
+- `reload [--pack <name>]` — flush the in-process pack cache so the next call re-reads from disk. Auto-cascades through the extends-chain.
+
+**New MCP operations (9 — the agent on-ramp):**
+- `get_active_schema_pack` (read scope) — cheap identity packet: `{pack_name, version, sha8, page_types_count, link_types_count, primitive_summary, source_tier}`.
+- `list_schema_packs` (read) — bundled + installed packs.
+- `schema_stats` (read) — same output as the CLI `stats` verb, source-scoped.
+- `schema_lint` (read) — file-plane rules over MCP (DB-aware `--with-db` is CLI-only).
+- `schema_graph` (read) — JSON `{nodes, edges}` derived from link types and frontmatter_links.
+- `schema_explain_type` (read) — resolved settings for one declared type.
+- `schema_review_orphans` (read) — drilldown into untyped pages.
+- `schema_apply_mutations` (admin scope, NOT localOnly) — **batched** atomic mutation op. One call applies a list of mutations (`add_type`, `add_link_type`, `set_extractable`, etc.) inside a single `withPackLock` scope. Remote agents like Wintermute can compose multi-step refactors as one transaction. Audit log records `actor: mcp:<clientId8>` per mutation.
+- `reload_schema_pack` (admin) — flush cache + extends-chain cascade.
+
+**Lint rules grew from 2 to 11:**
+- `alias_shadows_type`, `alias_declared_by_two_types`, `alias_references_undeclared_type`
+- `enrichable_types_undeclared`, `link_types_undeclared`, `frontmatter_links_undeclared`
+- `expert_routing_without_prefix`, `prefix_collision`, `prefix_strict_subset_overlap`
+- DB-aware (`--with-db`): `extractable_empty_corpus`, `mutation_count_anomaly`
+
+**Mutation safety primitives:**
+- `pack-lock.ts` — atomic `O_CREAT|O_EXCL` acquire. NOT the TOCTOU `existsSync+writeFileSync` shape from `page-lock.ts`. TTL refresh every 10s while a mutation runs. `--force` semantics: "steal stale lock," not "skip locking."
+- `mutate-audit.ts` — ISO-week JSONL at `~/.gbrain/audit/schema-mutations-YYYY-Www.jsonl`. **Privacy-redacted by default**: type names → sha8, prefixes → first slug segment only. Matches `candidate-audit.ts` privacy posture so a leaked screenshot of either audit file can't reveal sensitive taxonomy. Opt out of redaction with `GBRAIN_SCHEMA_AUDIT_VERBOSE=1`. Logs both success AND failure events so the `schema_pack_writability` doctor check (v0.40.7+) has signal to read.
+- Atomic write via `.tmp + fsync + rename`. The pack file on disk is NEVER partial.
+
+**Cross-process cache invalidation:**
+- `loadActivePack` now stats the pack file with a 1-second TTL gate (env override `GBRAIN_PACK_STAT_TTL_MS`). Operator runs `gbrain schema add-type foo` from a terminal; the autopilot daemon picks up the new type within 1 second on its next `loadActivePack` call. Worst-case stat overhead: ~50µs at most once per second per process. Hot-path cost inside the TTL window: ~10ns.
+- `invalidatePackCache(name)` walks the extends-chain reverse-graph (codex C6 fix). Editing a parent pack used to leave children stale; now every dependent invalidates too.
+
+**T1.5 pack-aware wiring (the silent-no-op fix, partial):**
+- `gbrain whoknows` + the `find_experts` MCP op now consult the active pack for expert types. A `researcher` type declared `expert_routing: true` actually surfaces in `whoknows` results (pre-v0.40.6 it silently never matched because the query path read hardcoded `['person', 'company']`).
+- **Pack-load failure semantics**: empty filter, NOT hardcoded defaults. A pack-load failure makes the query return empty (loud, agent debugs the pack-load problem) instead of silently re-introducing types the user packed out. Same lesson the v0.34.1 federated-read trust gate paid for.
+- Remaining T1.5 sites — `facts/eligibility.ts` and `enrichment-service.ts`'s `'person' | 'company'` union — deferred to v0.40.7+. Filed as TODO.
+
+**Skill + RESOLVER + Convention layer:**
+- `skills/schema-author/SKILL.md` — the agent dispatcher for "evolve the schema pack." Explicit non-goals callout to `brain-taxonomist` (filing one specific page) and `eiirp` (schema-check during iteration) so agents pick the right surface. Workflow: brain → assess → propose → apply → sync → verify → commit.
+- `skills/conventions/schema-evolution.md` — when to add a type vs alias vs prefix. Decision tree: <20 pages → don't pack-codify; 20-100 → alias or narrow prefix; 100+ → first-class type.
+- `skills/RESOLVER.md` entry for `schema-author` with the full trigger list.
+
+### Migration safety
+
+- Pre-v0.40.6 brains: zero breaking changes. The 9 new MCP ops are additive; the existing 16 schema verbs unchanged.
+- Existing OAuth clients with `read` scope: read the new schema ops out of the box.
+- Existing OAuth clients with `admin` scope: can call `schema_apply_mutations` and `reload_schema_pack` immediately. The audit log captures `actor: mcp:<clientId8>` on every mutation for forensic traceability.
+- The mutation primitives refuse to touch bundled packs (`gbrain-base`, `gbrain-recommended`) — `gbrain schema fork gbrain-base mine` first.
+
+### What's safe to know about
+
+- The YAML emitter does NOT preserve comments or formatting in pack.yaml files when mutated. Authors who care about hand-written YAML layout should pin `pack.json` instead.
+- The audit log redacts type names by default. If you need to grep for the raw type name during debugging, set `GBRAIN_SCHEMA_AUDIT_VERBOSE=1` and re-run the mutation.
+- `gbrain schema sync --apply` on a 100K-page brain runs in chunks of 1000; each chunk completes in <100ms. Total wallclock ~10s for 100K rows. Concurrent writers see at most a 100ms wait on any single row.
+
+### Itemized — for contributors
+
+- Plan + 21 decisions captured at `~/.claude/plans/system-instruction-you-are-working-recursive-thacker.md`.
+- Closed PR #1321 with successor pointer comment crediting `@garrytan-agents`.
+- 6 commits land the wave: foundations (e8ea1792), mutate (21beda7f), stats+sync (4f493c96), CLI wiring (60c3da92), MCP ops (90bbd3fa), this commit (skill + docs + version bump).
+- 255+ schema-pack-related tests green (84 new across 9 test files this wave).
+- 3 follow-up TODOs filed for v0.40.7: enrichment-service.ts union widening (`'person' | 'company'` → `string`), facts/eligibility.ts pack-aware extractable-type wiring, doctor checks for schema_pack_coverage / schema_pack_writability / schema_pack_mutation_audit.
+- Contributed by `@garrytan-agents` (original PR #1321 design + verb shape) and `@garrytan` + Claude Opus 4.7 1M (production rebuild).
+
+## [0.40.6.0] - 2026-05-23
+
+**`gbrain sync --all` now syncs your sources at the same time instead of one after the other, and you can see the health of every source at a glance with `gbrain sources status`.** If you have a brain with 4+ sources connected to it, the cron job that keeps everything up to date used to take as long as the slowest source. One stuck `git pull` on a big media-corpus repo held up everything else, and after 24 hours you'd start seeing stale-data warnings pile up. Now the sources run together — independent ones don't wait on each other, and you can run `gbrain sources status` to see at a glance which ones are fresh, stale, or running behind. Per-source log lines come prefixed with `[source-id]` so you can grep one source's output cleanly even when several are running.
+
+To turn it on: nothing. `gbrain sync --all` is now parallel by default with a sane budget (4 sources at a time on Postgres, serial on PGLite). Pass `--parallel 1` to force the old sequential behavior, or `--parallel 8` if your pgbouncer is sized for it. The new `gbrain sources status` and `gbrain sources status --json` commands are also live without any setup.
+
+What you'd see in a concrete example: a 4-source brain on Postgres goes from `4m 11s` to `1m 17s` per cron tick (and the doctor score stays healthier because every source's `last_sync_at` advances inside the same tick instead of one source per tick). Stuck sources don't block fresh ones from starting. Source-failure isolation works the same way — one source erroring out doesn't abort the others; the JSON envelope reports `ok_count` and `error_count` separately so monitoring can alert on partial failure.
+
+Things to know about: (1) `--skip-failed` and `--retry-failed` refuse to combine with `--parallel > 1` for this release, because the sync-failures log is brain-global today and parallel acks race. Run those recovery flows with `--parallel 1`. (2) The connection budget under parallel sync is `--parallel × --workers × 2` (each per-file worker opens its own small pool); a stderr warning fires when the product exceeds 16 so you can size pgbouncer / Postgres `max_connections` before it bites. (3) Per-source line prefix uses `source.id` (slug-validated), not `source.name` (free-form), so no newline-injection through a malicious source name can break your grep.
+
+This release is built on top of community PR #1314 from @garrytan-agents — the original parallel-sync design plus a `--status` dashboard. Codex's outside-voice review of the original plan caught three structural issues the eng review alone missed (lock asymmetry, broken SQL that tests stubbed past, and a 2× connection-budget undercount), so the landed version is meaningfully tighter than either starting point.
+
+### Itemized changes
+
+**`gbrain sync --all` parallel fan-out (load-bearing change):**
+
+- `performSync` now defaults to a per-source DB lock id (`gbrain-sync:<source_id>`) whenever `SyncOpts.sourceId` is set. The legacy single-default-source path keeps the global `gbrain-sync` lock for back-compat. The per-source path also wraps in `withRefreshingLock` so long-running sources don't lose their lock at the 30-min TTL mid-run. Closes the bug class where `sync --all` and `sync --source foo` would otherwise take different locks for the same source and race.
+- Continuous worker pool replaces the sequential `for...of` loop: `parallel` long-lived async workers pull from a shared FIFO queue until empty. Slow source doesn't block already-finished workers from picking up the next pending source.
+- New CLI flag `--parallel N` validated through the same `parseWorkers` helper as `--workers`. Default `min(sourceCount, --workers, 4)`. Pass `--parallel 1` to force the legacy serial behavior.
+- New constant `DEFAULT_PARALLEL_SOURCES = 4` in `src/core/sync-concurrency.ts` (sibling to the existing `DEFAULT_PARALLEL_WORKERS`).
+- Stderr warning fires when `parallel × workers × 2 > 16` with the formula in the message text so operators can size pgbouncer / Postgres `max_connections` correctly.
+- `--skip-failed` and `--retry-failed` refuse to combine with `--parallel > 1` (loud error, paste-ready hint). Source-scoping the failure log is filed as a v0.41+ follow-up.
+
+**`gbrain sources status` read-only dashboard:**
+
+- New `gbrain sources status [--json]` subcommand. Sits alongside `gbrain sources list/add/remove/archive` (D3 decision: reads and writes don't share a verb).
+- Human mode prints a right-aligned numeric-column table: source name, state (fresh/stale/severe + disabled flag), staleness hours, page count, embedding coverage percent, last sync timestamp. Brain-wide unacked-failures count + a `WARNING: N source(s) are SEVERELY stale` line when applicable.
+- `--json` emits a stable `{schema_version: 1, generated_at, sources, unacknowledged_failures, embedding_column}` envelope on stdout (per-source rows expose `source_id`, `name`, `local_path`, `sync_enabled`, `last_sync_at`, `staleness_hours`, `staleness_class`, `last_commit`, `pages`, `chunks_total`, `chunks_unembedded`, `embedding_coverage_pct`).
+- Embedding column resolved via the registry (`src/core/search/embedding-column.ts`) so Voyage / multimodal / non-default-column brains see counts against the column they actually use.
+- Archived sources are excluded by the input filter (`archived IS NOT TRUE`); use `gbrain sources archived` to inspect those.
+- Staleness thresholds match `gbrain doctor`'s sync-freshness rule (24h / 72h).
+
+**Per-source line prefix (kubectl-style):**
+
+- New helper `src/core/console-prefix.ts` exporting `withSourcePrefix(id, fn)`, `getSourcePrefix()`, `slog(...)`, `serr(...)`. AsyncLocalStorage-backed so the prefix propagates through every `await` boundary without manual threading.
+- 38 `console.log`/`console.error` call sites inside `performSync` and its in-file callees migrated to `slog`/`serr`. 16 sites inside `src/commands/embed.ts` (`runEmbedCore` + helpers) migrated too. `src/core/progress.ts:emitHumanLine` is prefix-aware (JSON mode stays unprefixed so NDJSON consumers don't choke).
+- Prefix uses `source.id` (slug-validated by `sources add`), NOT `source.name` (free-form text) — defeats log-injection through newline / control-character names.
+- Single-source `gbrain sync` callers (no `withSourcePrefix` wrap) see identical output to v0.40.2 — slog/serr fall through to bare console fns outside the wrap.
+
+**`--json` envelope contract pinned:**
+
+- Stable `{schema_version: 1, sources, parallel, ok_count, error_count}` shape on stdout under `gbrain sync --all --json`. `gbrain sources status --json` uses a parallel envelope shape.
+- Per-source row shape: `{source_id, name, status: 'ok'|'error', sync_status, added, modified, deleted, chunks_created, embedded, error?}`.
+- Exit code matrix: 0 = all sources ok, 1 = any source error, 2 = cost-prompt-not-confirmed (unchanged from existing behavior).
+- Human banners (start banners, `printSyncResult`, completion summary) route to stderr under `--json` so `gbrain sync --all --json | jq` parses cleanly.
+
+**Dashboard SQL correctness:**
+
+- `buildSyncStatusReport` SQL is the canonical `content_chunks ch JOIN pages pg ON pg.id = ch.page_id WHERE pg.deleted_at IS NULL` shape with the active embedding column resolved from the registry. The original community PR shipped `chunks ch JOIN ON page_slug` which would have crashed on PGLite parse and silently zeroed on Postgres via a swallow-catch.
+- Errors from the dashboard SQL now propagate. Pre-fix, a bare `catch { countRows = [] }` returned a misleading "0 chunks" report on real DB errors (DB down, permission denied, statement timeout).
+
+**Tests:**
+
+- New `test/console-prefix.test.ts` — 8 cases pinning AsyncLocalStorage propagation, nested wraps, embedded-newline prefixing, back-compat fast path outside the wrap.
+- New `test/sync-all-parallel.test.ts` (replaces the original PR's stubbed tests) — 16 cases covering `resolveParallelism` across PGLite / explicit / auto / single-source / zero-source paths, per-source lock id format + source-name newline injection defense, `buildSyncStatusReport` staleness math + coverage math + error propagation + envelope shape, connection-budget warning math (with the corrected `× 2` factor), per-source prefix routing.
+- New `test/e2e/sync-status-pglite.test.ts` — IRON RULE regression: real PGLite seeds 2 sources × pages × chunks (mixed embedded/unembedded), soft-deletes 1 page, archives 1 source. Validates the SQL excludes soft-deleted from counts, excludes archived sources, reports the correct active embedding column, and propagates errors. This is the case that would have caught the PR's original broken SQL.
+- All 148 existing sync-adjacent tests continue to pass (`test/sync.test.ts`, `test/sync-parallel.test.ts`, `test/sync-concurrency.test.ts`, `test/sync-failures.test.ts`, plus the new suites).
+
+**Compatibility:**
+
+- No schema changes. No new dependencies.
+- Single-source / non-`--all` paths: bit-for-bit identical behavior to v0.40.2.
+- PGLite users get serial behavior (single-connection engine). The parallel path is a Postgres-only win.
+
+## To take advantage of v0.40.6.0
+
+`gbrain upgrade` should do this automatically. If it didn't:
+
+1. **No migrations to run.** This release is additive code — no schema changes, no `gbrain apply-migrations` work.
+2. **Try the new surfaces:**
+   ```bash
+   gbrain sources status                           # read-only dashboard, table on stdout
+   gbrain sources status --json | jq '.sources[] | {name, staleness_class, embedding_coverage_pct}'
+   gbrain sync --all --parallel 4                  # fan-out across sources; per-source [id] prefix on every line
+   gbrain sync --all --parallel 4 --workers 4      # asserts the connection-budget warning fires (32 connections > 16)
+   gbrain sync --all --json | jq '{ok_count, error_count}'   # JSON envelope on stdout, banners on stderr
+   ```
+3. **For cron / autopilot users:** `gbrain sync --all` (no `--parallel` flag) inherits the new default — `min(sourceCount, 4)` per fan-out wave. If your pgbouncer is sized for fewer connections, pass `--parallel 2` (or `--parallel 1` for the legacy serial behavior).
+4. **If anything looks off,** file an issue at https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - the exact command you ran + the stderr output (the connection-budget warning + any per-source error messages are particularly useful)
+## [0.40.5.0] - 2026-05-23
+
+**Your federated brain syncs every source at once instead of one-by-one, reacts to GitHub pushes within seconds instead of minutes, and stops blocking on a slow source when you onboard a new one.**
+
+If you've ever watched `gbrain sync --all` chew through a 200K-page default brain before it even starts looking at your 13K-page zion-brain, this release is for you. Four federated sources used to sync end-to-end one after the other. Now they run in parallel, each in its own write window, and embedding catches up async via a background job instead of holding the whole pipeline. A 200K + 13K + 5K + 88K brain that took 12 minutes serial now finishes in ~3.
+
+The same change unlocks push-triggered sync. Wire a GitHub webhook at `POST /webhooks/github`, run `gbrain sources webhook set <source-id> --github-repo owner/name` to register the secret, and a `git push` lands in your brain within ~5 seconds instead of waiting for the next autopilot tick. Federation flip (`gbrain sources federate zion-brain`) now auto-submits an embed-backfill job for the missing chunks so search quality catches up without you having to remember `gbrain embed --stale`.
+
+For the autopilot, the "brain looks healthy → sleep" shortcut no longer prevents source sync. A healthy brain score says nothing about whether GitHub has new commits; v0.40 decouples the two so per-source freshness checks fire independently of the score gate. Polling-only deployments (no webhook configured) still get freshness within the autopilot interval; webhook-driven deployments get sub-second.
+
+### How to turn it on
+
+`gbrain upgrade` handles the schema migration and the new file. Then:
+
+```bash
+# See per-source health (lag, embed coverage, queue depth, failures)
+gbrain sources status
+
+# Run doctor to surface federation health (lag/embed warnings + paste-ready fixes)
+gbrain doctor
+
+# Onboard a new source — embed-backfill runs async
+gbrain sources add zion-brain --path ~/git/zion-brain --federated
+
+# Set up push-trigger for a source
+gbrain sources webhook set zion-brain --github-repo Garry-s-List/zion-brain
+# (paste the displayed secret + URL into the GitHub webhook UI)
+
+# Manually trigger a sync from a script
+gbrain sync trigger --source zion-brain
+```
+
+### The numbers that matter
+
+Measured on a 4-source brain (default 197K pages, zion-brain 13K, media-corpus 5K, straylight 88K):
+
+| Operation | v0.39 | v0.40 | Speedup |
+|---|---|---|---|
+| `gbrain sync --all` (no embed) | 12m sequential | 3m parallel (max-sources=4) | ~4x |
+| Push → sync visible | ≤5min (autopilot interval) | ~5s (webhook) | ~60x |
+| New 50K-page source onboarding (block on embed) | inline ~$5 + ~8min wait | async background | non-blocking |
+| `gbrain sources status` on 4 sources, 300K chunks | N/A (didn't exist) | <2s (batched GROUP BY) | new |
+
+Per-source isolation in numbers: two `gbrain sync` calls against different sources used to serialize on a global `gbrain-sync` lock. Now they take `gbrain-sync:<source>` so cross-source runs go full-parallel; only same-source contention still serializes.
+
+### What's safe to know about
+
+- **Feature flag for clean rollback.** `gbrain config set sync.federated_v2 false` + restart autopilot reverts to v0.39 sequential behavior without uninstalling. Per-source lock and migration v92 stay on regardless (correctness fixes, not features).
+- **Webhook secret storage.** Per-source plaintext in `sources.config.webhook_secret` (trust posture: the DB IS the boundary; same posture as `config.access_policy`). The new `redactSourceConfig` helper redacts it from every serializer that returns raw config, and a CI guard (`scripts/check-source-config-leak.sh`) blocks the bug class going forward.
+- **One-time secret reveal.** `gbrain sources webhook set <id>` prints the secret once. `gbrain sources webhook show <id>` is metadata-only. Rotate via `gbrain sources webhook rotate <id>` if you lost it; the old secret invalidates immediately.
+- **Embed-backfill budget caps.** Two layers: per-job ($10 default, override via `embed.backfill_max_usd`) and per-source-per-24h ($25 default, override via `embed.backfill_max_usd_per_source_24h`). A webhook storm or repeated federation flips cannot quietly rack up unbounded Voyage spend.
+- **Webhook ref filtering.** Only pushes to the source's `tracked_branch` (auto-detected from `git rev-parse --abbrev-ref HEAD` on first sync after upgrade) trigger sync. Feature-branch pushes are 202-ignored with a clear reason — no wasted queue slots.
+- **Parallel sync defers embed.** `gbrain sync --all` no longer embeds inline by default in v2 mode; each per-source completion auto-enqueues an `embed-backfill` job so vector coverage catches up async. Pass `--no-auto-embed` to skip the auto-enqueue, or `--serial` to use the v1 inline-embed path.
+
+### What we caught before merging
+
+Codex's outside-voice review on the plan caught a real bug class: submitting `embed-backfill` as a child job (with `parent_job_id`) immediately flips the parent sync handler to `waiting-children`, which then fails the parent's own completion. The fix is fire-and-forget submission (no parent_job_id); embed-backfill outlives the short-lived sync handler by design. Two more catches: phantom-redirect's lock acquisition needed the per-source rename too (or it would silently break cross-source phantom isolation), and `embedBatch` doesn't exist as a public primitive — the working stale-embed loop is private in `embed.ts`. v0.40 extracts `embedStaleForSource` to `src/core/embed-stale.ts` so the new handler and the existing CLI share one implementation instead of drifting.
+
+The webhook handler had a different bug — caught at test-writing time. `Buffer.from('sha256=<hex>', 'hex')` silently truncates at the first non-hex char (the 's'), so a naive `safeHexEqual('sha256=' + computed, 'sha256=' + expected)` would compare two empty buffers and return true for every signature. Fix: strip the `sha256=` prefix before the constant-time compare. Pinned by a `test/sources-webhook.test.ts` IRON-RULE case.
+
+## To take advantage of v0.40.5.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the migration manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Verify the new surfaces:**
+   ```bash
+   gbrain sources status          # per-source health dashboard
+   gbrain doctor                  # check federation_health
+   gbrain sync trigger --help     # confirm trigger subcommand wired
+   ```
+3. **Opt out (if needed):** `gbrain config set sync.federated_v2 false && gbrain jobs supervisor restart` reverts to pre-v0.40.5 sequential behavior. The per-source lock + migration v90 stay on regardless.
+4. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
+### Itemized changes
+
+**Federated Sync v2 — parallel, push-triggered, minion-native (6 components):**
+
+1. **Per-source sync lock** (`src/core/db-lock.ts`): `syncLockId(sourceId)` replaces the global `SYNC_LOCK_ID`. Back-compat alias keeps the old constant resolving to `gbrain-sync:default`. Phantom redirect also acquires the per-source key so cross-source phantom isolation works the same way (D16, codex outside-voice catch).
+2. **Parallel `sync --all`** (`src/commands/sync.ts` + new `src/core/parallel.ts`): `Promise.allSettled` fan-out with `--max-sources N` cap. `--serial` opts back into v1. PGLite forces serial (single-writer constraint).
+3. **`embed-backfill` minion handler** (`src/core/minions/handlers/embed-backfill.ts` + `src/core/embed-backfill-submit.ts` + `src/core/embed-stale.ts`): decoupled embedding pipeline. Per-source DB lock at handler entry (D2). $10/job BudgetTracker cap (D6). Submit-gate enforces 10min cooldown + $25/source/24h rolling spend cap (D19).
+4. **Extended `sync` handler** (`src/commands/jobs.ts`): `auto_embed_backfill: true` (default) fire-and-forget submits embed-backfill on completion (D22).
+5. **`sync trigger` CLI** + **`POST /webhooks/github`**: push-triggered. Webhook is HMAC-verified (60 req/min/IP rate limit, pre-DB short-circuit on missing signature, ref-matched against `tracked_branch`).
+6. **`sources status` command** + **`federation_health` doctor check**: shared batched GROUP BY pipeline. 4 queries total instead of 6×N per-source round-trips.
+
+**New surfaces:**
+- `gbrain sources status [--json]` — per-source health dashboard
+- `gbrain sources webhook set/show/rotate/clear <id>` — webhook lifecycle with one-time-reveal posture
+- `gbrain sources tracked-branch <id> [--set <branch>] [--detect]` — branch lifecycle for ref filtering
+- `gbrain sync trigger --source <id> [--priority high|normal|low]` — push-trigger CLI
+- `gbrain sync --all [--serial] [--max-sources N] [--no-auto-embed]` — parallel fan-out flags
+- `gbrain config set sync.federated_v2 false` — v0.39-revert escape hatch
+
+**Schema:**
+- Migration v92 (`sources_github_repo_index`): partial expression index on `sources.config->>'github_repo'` for fast webhook source-lookup. Both engines.
+
+**Doctor:**
+- New `federation_health` check (three-state: ok/warn/fail per source, aggregated to one Check)
+
+**Correctness fixes (in-scope, unconditional):**
+- D21: `sync.ts` facts backstop now passes `sourceId` to `engine.getPage` (pre-fix would attribute facts to wrong source on slug collision in federated brains)
+- D15.4: `redactSourceConfig` + CI guard prevents webhook secret leak through every sources.config serializer
+- D15.5: `safeHexEqual` extracted to `src/core/timing-safe.ts` (shared with the new webhook HMAC verify)
+
+**Tests:**
+- 10 new test files, 70+ new test cases. 4 IRON-RULE regressions pinned (SYNC_LOCK_ID back-compat, phantom per-source lock, embed-backfill kill+resume, webhook HMAC prefix-strip).
+
+**Voyage HMAC bug caught at test-write time** (see "What we caught before merging" above): `Buffer.from('sha256=<hex>', 'hex')` truncates at non-hex chars — without the prefix-strip in the webhook handler, every signature would have "matched" empty buffers.
+
+## [0.40.4.0] - 2026-05-22
+
+**Your search now notices when a page is a hub for your query — and stops same-session weak chunks from crowding out a strong hit.**
+
+GBrain's search already does a lot: it blends keyword and vector matches, reranks them, then nudges the order based on backlinks, salience, and recency. But the graph of links sitting in your brain was mostly wallpaper at query time — we knew which pages linked to which, and we used that count globally (popular pages get a small boost), but we never asked "for THIS query specifically, which top results are connected to each other?" That's the new signal.
+
+Three small, additive moves in the ranker:
+
+1. **Adjacency hub** (×1.05): if a page in the top-K is linked to by 2+ OTHER top-K results, it's a hub for this specific query. Small bump.
+2. **Cross-team hub** (×1.10): if a top-K page is linked from pages in 2+ DIFFERENT sources (not counting its own source), it's corroborated across team brains. Slightly bigger bump. Dormant if you only have one brain — but the moment you mount a team brain or your CEO topology widens, the signal lights up.
+3. **Session diversify** (×0.95): if three results all come from the same chat session, keep the highest-scoring one at full score and DEMOTE the rest. Stops weak chunks from a chatty session from elbowing a strong hit out of the token budget. (The original v1 plan boosted same-session pages — codex caught it was structurally backwards, and we flipped it before merging.)
+
+All three live inside the existing post-fusion stage, so they inherit the v0.35.6.0 floor-ratio gate that prevents weak pages from getting boosted past strong ones via popularity.
+
+Magnitudes are conservative on purpose (1.05/1.10/0.95). A score-distribution probe collects data on top-K reorder-band widths under real use — that data feeds a calibration wave in v0.41+ that tunes the magnitudes against actual ranking shifts, not vibes.
+
+Default on for `balanced` and `tokenmax` modes; off for `conservative`. Opt out per-brain with `gbrain config set search.graph_signals false`.
+
+### How to use it
+
+```bash
+# Check whether it's on (mode default or config override)
+gbrain doctor --json | jq '.checks[] | select(.name == "graph_signals_coverage")'
+
+# Watch what fired in your recent searches
+gbrain search stats --days 7
+# → Graph signals: enabled / failures / fail-rate
+
+# See per-stage attribution for one query
+gbrain search "founders we know in San Francisco" --explain
+# → 1. people/alice (score=12.4)
+#      base=10.2 (rrf+cosine)
+#      + backlink ×1.08
+#      + adjacency ×1.05 (hits=3)
+#      = final 12.4
+
+# Override the mode default
+gbrain config set search.graph_signals false   # opt out
+gbrain config set search.graph_signals true    # opt in for conservative
+```
+
+### Cathedral expansions that came along
+
+This wave grew significantly through review (boil-the-lakes orientation):
+
+- **Per-stage score attribution in EVERY boost stage** (D12=A). Every stage that mutates `score` now stamps a field recording what it multiplied: `backlink_boost`, `salience_boost`, `recency_boost`, `exact_match_boost`, `graph_adjacency_boost`, `graph_cross_source_boost`, `session_demote_factor`, plus a `base_score` snapshot captured once at runPostFusionStages entry. `gbrain search --explain` reads them to render the per-result breakdown above. JSON envelope: same fields surface verbatim under existing `--json` output.
+
+- **Audit-writer unification** (D5=B). The five hand-rolled JSONL audit modules in the codebase (rerank-failures, shell-jobs, supervisor, slug-fallback, phantoms) duplicated the same ISO-week filename math, best-effort write loop, and read-current-plus-previous-week loop. Extracted `src/core/audit/audit-writer.ts` as the shared primitive; refactored all five plus the new `graph-signals-failures` audit onto it. Public API preserved bit-for-bit — every existing test passes unchanged.
+
+- **Eval gates with paired bootstrap** (D13=A). New `test/e2e/graph-signals-eval.test.ts` runs each longmemeval-mini question twice (off vs on) and asserts: (1) paired bootstrap p≥0.05 in the wrong direction OR delta ≥ 0 (no statistically significant regression), (2) mean Jaccard@5 ≥ 0.5 (results didn't shift wildly), (3) top-1 stability ≥ 0.7 (most top picks preserved), (4) recall@5 drop ≤ 5pt absolute (catastrophic catch). 10,000 resamples, deterministic seeded RNG, hermetic via PGLite. Reusable `pairedBootstrapPValue` pure function exported for future calibration waves.
+
+### What's safe to know about
+
+- **Mid-deploy cache hit-rate dip**: `KNOBS_HASH_VERSION` bumps 3→4 so a graph-on cache write can't be served to a graph-off lookup. Existing `query_cache` rows from before the upgrade hash differently — natural row segregation. Clears within `cache.ttl_seconds` (3600s default).
+- **Single-source brains**: cross-source signal is dormant (count is always 0). Adjacency + session diversification still fire normally. No cost.
+- **Remote-server deploys**: graph-signal fail-open events are JSONL-only today (codex outside-voice flagged the split-brain observability). `search stats` shows success metrics on remote, full metrics on local. A DB-backed audit table is filed as T-todo-3 for v0.41+.
+
+### Itemized changes
+
+- `src/core/search/graph-signals.ts` (NEW): `applyGraphSignals` helper with `sessionPrefix`, `computeScoreDistribution`, and `pairedBootstrapPValue`-compatible internal score handling. Constants `ADJACENCY_BOOST=1.05`, `CROSS_SOURCE_BOOST=1.10`, `SESSION_DEMOTE=0.95`, `DEFAULT_TOP_K=20`, threshold mins. Test seam via `adjacencyFn` injection. Fail-open with JSONL audit row.
+- `src/core/search/hybrid.ts`: extended `runPostFusionStages` with 4th stage (`graphSignalsEnabled`, `onGraphMeta`, `onScoreDistribution`). `base_score` stamped at function entry idempotently. Each existing boost stage (`applyBacklinkBoost`, `applySalienceBoost`, `applyRecencyBoost`) stamps its multiplier.
+- `src/core/search/intent-weights.ts`: `applyExactMatchBoost` stamps `exact_match_boost` when fired.
+- `src/core/search/rerank.ts`: `applyReranker` stamps `reranker_delta` (rank delta — positive = improved).
+- `src/core/search/mode.ts`: new `graph_signals: boolean` knob in `ModeBundle`. Defaults: conservative=false, balanced=true, tokenmax=true. `KNOBS_HASH_VERSION` 3→4 with `gs=` parts entry appended per CDX2-F13 convention. `SearchKeyOverrides` + `SearchPerCallOpts` + `loadOverridesFromConfig` + `SEARCH_MODE_CONFIG_KEYS` + `resolveSearchMode` + `attributeKnob` all carry the new field.
+- `src/core/search/explain-formatter.ts` (NEW): renders SearchResult[] as a multi-line per-result breakdown. Reads every boost-stamping field. "no boosts applied" empty path. 4-decimal precision with trailing-zero strip.
+- `src/core/cli-options.ts`: `CliOptions` gains `explain: boolean`. `parseGlobalFlags` recognizes `--explain` anywhere in argv.
+- `src/cli.ts`: `formatResult` for `search` + `query` cases routes to `formatResultsExplain` when `CliOptions.explain` is set.
+- `src/commands/search.ts`: `gbrain search stats` gains `graph_signals` section (enabled/source/failures_count/failures_by_reason). JSON envelope adds a `graph_signals` sibling property to existing stats; `_meta.metric_glossary` adds two new keys. Human output prints the section after the existing block.
+- `src/commands/doctor.ts`: new `graph_signals_coverage` check wired into both `runDoctor` (local) and `doctorReportRemote` (HTTP/JSON path). Reads `search.graph_signals` config first, falls back to mode default; silent ok when disabled; warns at <10% inbound coverage with `gbrain extract all` fix hint; ok at ≥30% ("fire on most queries") and 10-29% ("fire occasionally"), each with the percentage.
+- `src/core/engine.ts`: new `getAdjacencyBoosts(pageIds): Promise<Map<number, AdjacencyRow>>` method. SearchResult type extended with 12 new optional fields (graph signals + attribution).
+- `src/core/postgres-engine.ts` + `src/core/pglite-engine.ts`: `getAdjacencyBoosts` impl with parity SQL. `COALESCE(p.source_id, 'default')` for null safety; `HAVING >= 1` matches JSDoc; cross_source_hits excludes target's own source via CASE-WHEN on JOINed target row.
+- `src/core/types.ts`: `AdjacencyRow` interface + 12 new optional SearchResult fields.
+- `src/core/audit/audit-writer.ts` (NEW): shared primitive (`createAuditWriter`, `computeIsoWeekFilename`, `resolveAuditDir`). 22 unit tests pin the contract.
+- `src/core/rerank-audit.ts`, `src/core/audit-slug-fallback.ts`, `src/core/minions/handlers/shell-audit.ts`, `src/core/minions/handlers/supervisor-audit.ts`, `src/core/facts/phantom-audit.ts`: refactored onto `createAuditWriter`. Public API preserved.
+- Tests added: `test/audit/audit-writer.test.ts` (22), `test/e2e/graph-signals-engine.test.ts` (7), `test/search/graph-signals.test.ts` (24 including the IRON-RULE floor-gate regression), `test/search/attribution-stamping.test.ts` (16), `test/search/explain-formatter.test.ts` (19), `test/search/search-stats-graph-signals.test.ts` (6), `test/e2e/graph-signals-eval.test.ts` (10 — 4 eval gates + 5 pure bootstrap function tests).
+- Tests extended: `test/doctor.test.ts` (7 new for coverage check), `test/search-mode.test.ts` (8 new for graph_signals knob), `test/search/knobs-hash-reranker.test.ts` (version assertion 3→4), `test/cross-modal-phase1.test.ts` (version assertion 3→4), `test/cli-options.test.ts` (3 new for --explain parsing), `test/thin-client-upgrade-prompt.test.ts` (CliOptions literal updated).
+
+### To take advantage of v0.40.4.0
+
+`gbrain upgrade` should pick this up automatically. If your install has `balanced` or `tokenmax` mode (the default), graph signals are already on after upgrade.
+
+1. **Verify it's running:**
+   ```bash
+   gbrain doctor --json | jq '.checks[] | select(.name == "graph_signals_coverage")'
+   ```
+   Expected: `status: "ok"` with a coverage percentage. If you get a warn at <10% coverage, run `gbrain extract all` to populate the link graph from your markdown.
+
+2. **Try it on a query:**
+   ```bash
+   gbrain search "your favorite query" --explain
+   ```
+   You'll see per-stage attribution showing what each boost did.
+
+3. **Opt out if needed:**
+   ```bash
+   gbrain config set search.graph_signals false
+   ```
+
+4. **If something looks wrong**, please file an issue: https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor --json` and one or two `gbrain search ... --explain` examples that look off.
+
+### For contributors
+
+- New shared primitive `src/core/audit/audit-writer.ts` is the way to add JSONL audits going forward. Replicating the ISO-week math is no longer acceptable — wrap `createAuditWriter` instead.
+- `pairedBootstrapPValue` is exported from `test/e2e/graph-signals-eval.test.ts` for any future eval suite that needs a paired Bernoulli A/B significance test.
+- Five TODOs filed for v0.41+: profile graph-signal SQL latency, run magnitude calibration wave on 30 days of search-stats data, move fail-open audits to a DB table, sync-topology-aware cross-source signal, replace doctor's global density threshold with actual fire-rate measurement.
+
+## [0.40.3.0] - 2026-05-22
+
+**Your search now understands what each chunk is about — AND its cached results expire the moment a page changes.**
+
+Two big things changed in this release. The first is the contextual retrieval cathedral that was originally in v0.40.3.0: every chunk gets the page title wrapped around it before going into the search index, so a sentence about "raised $3M" now remembers it came from "Acme Corp Series A" instead of competing with every other fundraise mention in your brain. Power users on tokenmax mode get the premium tier — a fresh per-chunk summary from Claude Haiku — which Anthropic's published research showed reduces retrieval failure rate 35-49% on document-heavy benchmarks.
+
+The second thing is cache invalidation that's actually correct. When the agent runs the same search twice in a row, the second call returns from cache in microseconds instead of running keyword search + vector search + reranking again. But before this release, the cache had no way to know if a page had been edited between the two calls — it just trusted itself for an hour (the TTL). So if you edited a page and then searched, the agent silently served the OLD version until the TTL expired. This release adds a two-layer gate: a cheap corpus-wide "has anything been written?" check (one indexed integer compare per cache hit) AND a per-result "are these specific pages still at their stored generation?" check. Either layer firing invalidates the row. Pre-upgrade cache rows still serve via a backward-compat path until they age out naturally — no cache stampede on upgrade.
+
+Plus four CLI improvements that close gaps in the v0.40.3 deferral list:
+- `gbrain mounts enable/disable <id>` toggles a mounted brain without removing it.
+- `gbrain mounts trust-frontmatter <id>` lets a mounted team brain's per-page frontmatter override the source's default contextual retrieval mode. Off by default — mounts opt in explicitly.
+- `gbrain sources set-cr-mode <id> <none|title|per_chunk_synopsis>` writes per-source overrides. Missing source ID fails loudly with a paste-ready `gbrain sources list` hint.
+- `gbrain config set search.mode tokenmax` now shows a banner explaining what changed (and the per-chunk Haiku backfill cost) and offers to submit `gbrain reindex --markdown` as a Minion job if a worker is alive. Non-TTY callers get a paste-ready hint to stderr instead of a silent stall.
+
+And one generic refactor: doctor's `Remediation` type lifted into its own `RemediationStep` module so other doctor checks can emit structured fix steps. The integrity and sync_failures checks now emit RemediationSteps too — `gbrain doctor --remediation-plan` and `--remediate` walk them automatically.
+
+### How to turn it on
+
+`gbrain upgrade` does the whole thing automatically. Post-upgrade prompt fires, explains the re-embed cost in plain text, gives you a 10-second window to abort, and re-embeds every markdown page through the new title-tier wrapper.
+
+To opt up to per-chunk Haiku synopsis:
+```bash
+gbrain config set search.mode tokenmax
+# (banner fires; on TTY + active worker it offers to submit reindex as a Minion job)
+gbrain reindex --markdown   # or pick that up after the prompt
+```
+
+To opt out entirely if quality regresses (soft kill switch — wrapped vectors stay in DB but new embeds skip the wrapper):
+```bash
+gbrain config set search.contextual_retrieval_disabled true
+```
+
+For mounted team brains:
+```bash
+gbrain mounts trust-frontmatter team-brain-id  # opt this mount into frontmatter overrides
+gbrain mounts disable team-brain-id            # toggle off without removing
+```
+
+### Tier ladder — what each search mode gets
+
+| Mode | Wrapper | Per-query cost | One-time backfill |
+|------|---------|----------------|-------------------|
+| `conservative` | none | $0 | $0 |
+| `balanced` (default) | title-only prefix | $0 (string concat) | $0 (current text-embedding-3 calls reused) |
+| `tokenmax` | per-chunk Haiku synopsis | $0 (one-time only) | ~$1-5 per 10K pages, ~17h at Anthropic's default Haiku rate limit |
+
+The wrapper is asymmetric: chunks get the context prefix when going into the embed call, but queries stay clean. Voyage + ZeroEntropy distinguish `inputType: 'query'` from `'document'` natively, so this works correctly; OpenAI symmetric users still benefit from document-side orientation.
+
+### What you'd see in a concrete example
+
+A page titled "Acme Corp Series A" with a chunk that reads `raised $3M from Fund A in 2024`:
+
+| Stored in DB (`content_chunks.chunk_text`) | What the embedder saw |
+|--------------------------------------------|----------------------|
+| `raised $3M from Fund A in 2024` (canonical, unchanged) | `<context>Acme Corp Series A\n</context>\nraised $3M from Fund A in 2024` |
+
+Search snippets, full-text search, the reranker, and debug output all read the canonical chunk_text. Only the embedding vector reflects the wrapped form. This separation is the load-bearing invariant of the wave (D20-T1).
+
+### Cache invalidation — how the two-layer gate works
+
+```
+WRITE PATH (any pages mutation)
+  INSERT or UPDATE pages → trigger fires
+    INSERT → row gets generation = MAX(generation) + 1
+    UPDATE → if (body/title/type/page_kind/content_hash/etc IS DISTINCT FROM)
+             NEW.generation = OLD.generation + 1
+
+STORE PATH (query-cache.ts:store)
+  SELECT id, generation FROM pages WHERE id = ANY($result_page_ids)
+  + SELECT MAX(generation) FROM pages
+  → stamp BOTH per-page snapshot AND corpus bookmark on the cache row
+
+LOOKUP PATH (query-cache.ts:lookup) — TWO-LAYER
+  Layer 1 (cheap): (SELECT MAX(generation) FROM pages) <= stored_bookmark
+                   O(log N) via pages_generation_idx
+  Layer 2 (per-page): jsonb_each + LEFT JOIN pages
+                      page deleted → invalidate
+                      page bumped → invalidate
+                      pre-v0.40.3.0 rows with empty {} snapshot → vacuously valid
+```
+
+### Things to watch
+
+- **Migration v90 + v91**. v90 (renumbered from v0.40.3.0's original v81 on master merge) adds the 5 contextual retrieval columns. v91 adds `pages.generation BIGINT`, `query_cache.max_generation_at_store BIGINT`, the trigger, and the `pages_generation_idx` btree. All NULL-tolerant or have safe defaults; existing rows keep working unchanged.
+- **KNOBS_HASH_VERSION 3 → 5**. Bumped past 4 (claimed by salem's v0.40.4 graph signals work) to keep cache-row shape collisions impossible across sibling waves. Existing v=3 cache rows become unreachable on first re-query after upgrade (one-time miss spike).
+- **Chunker version 2 → 3** signals the post-upgrade reembed sweep that every markdown page needs to be re-embedded through the new wrapper path. Chunk boundaries themselves are unchanged from v2.
+- **Race fix folded in (D24)**: the long-standing v0.35.x NULL→non-NULL upsert race between concurrent embed workers is finally closed. Two writers racing on the same chunk now let the fresher `embedded_at` win instead of last-writer-wins.
+
+### What we caught and fixed before merging
+
+The wave went through two rounds of /plan-eng-review and one /codex outside-voice review on top of the original v0.40.3 codex pass. The fresh codex round caught EIGHT genuine bugs in the deltas, all absorbed before code landed:
+
+- **Trigger allow-list too narrow.** Original plan watched 6 columns (body/frontmatter/compiled_truth/timeline/deleted_at/contextual_retrieval_mode). Codex pointed out that title, type, page_kind, and corpus_generation are all user-visible — silently NOT bumping on those would serve stale search results for title edits. Widened to 10 columns including content_hash as the canonical "content changed" signal.
+- **BEFORE UPDATE missed INSERTs.** The original trigger fired BEFORE UPDATE only. The v0.38 ingest_capture handler uses `INSERT ... ON CONFLICT DO UPDATE`, so fresh slugs took the INSERT path and silently never bumped MAX(generation). Cache rows stored before a new page existed would never invalidate. Fixed: trigger now fires BEFORE INSERT OR UPDATE, and the INSERT branch sets generation = COALESCE(MAX, 0) + 1 explicitly.
+- **Migration version collision risk.** Master shipped v82-v88 across v0.38/v0.39 while v0.40.3.0 was off-master. Our v81 (contextual_retrieval_columns) collided with master's. Plan: rename to v89. Codex caught that `garrytan/v0.40.2.0-trajectory-routing` already reserved v89 for `facts_event_type_column`. Re-renumbered to v90; new trigger work at v91.
+- **KNOBS_HASH_VERSION collision with salem.** Both our wave and salem's v0.40.4 graph-signals wave wanted v=4. Per D8 we bumped to v=5 so cache rows from either wave can't accidentally serve the other.
+- **D3 regression test too weak.** Original plan asserted ingest_capture bumps generation on existing slugs only. Codex pointed out the INSERT path (codex #4) ALSO needs explicit coverage. T11 test now exercises both paths + idempotent re-capture.
+- **v0.38 provenance columns.** ingested_via/ingested_at/source_uri/source_kind are returned by ingest_capture but not written to pages. If a future master change wires them into putPage, the trigger allow-list would silently miss content edits via those columns. Verified at implementation time; allow-list left at the current 10 columns.
+- **Index shape wrong.** Original plan said `(generation DESC)`. Codex pointed out plain `(generation)` btree is backward-scannable for MAX. Simplified.
+- **One missing master commit.** Plan said 5 commits; master was actually 6 commits ahead via v0.39.2.0 autopilot/cycle-lock wave. Adjusted Phase 1 expectations.
+
+### Itemized changes
+
+- **Migration v90** (`src/core/migrate.ts`): renamed from v0.40.3.0's original v81 to clear master's v82-v88 reservations. 5 additive columns wiring the three-tier wrapper ladder.
+- **Migration v91** (NEW): `pages.generation BIGINT` + `query_cache.max_generation_at_store BIGINT` + `bump_page_generation_fn` trigger (BEFORE INSERT OR UPDATE with 10-column content allow-list) + `pages_generation_idx` btree via CONCURRENTLY on Postgres / plain CREATE INDEX on PGLite. `transaction: false` matches the v14 pages_updated_at_index pattern.
+- **Schema mirrors** (`src/schema.sql`, `src/core/pglite-schema.ts`): pages + sources + trigger DDL + index updated.
+- **Bootstrap probes** (`src/core/{pglite,postgres}-engine.ts`): forward-reference checks added for all 5 v90 columns + pages.generation per the established v0.22.6.1 pattern. `test/schema-bootstrap-coverage.test.ts` REQUIRED_BOOTSTRAP_COVERAGE extended.
+- **New pure modules** (`src/core/`): `remediation-step.ts` (canonical RemediationStep type + makeRemediationStep factory + canonical-JSON idempotency key per codex D12 Bug 2), `search/query-cache-gate.ts` (two-layer cache gate helpers + SQL fragment), `search/mode-switch-ux.ts` (transition summarizer + worker probe + Minion submission).
+- **query-cache.ts** lookup() / store() rewrites: two-layer gate embedded in the lookup SQL; store() captures the page_generations snapshot + max_generation_at_store bookmark via the new buildPageGenerationsSnapshot helper. KNOBS_HASH_VERSION 4 → 5 (per D8 sequencing behind salem's pending v=4).
+- **config.ts hook**: `gbrain config set search.mode <X>` captures the OLD mode, calls setConfig, then invokes runModeSwitchUx with TTY + non-TTY + GBRAIN_NO_MODE_SWITCH_UX awareness. Honors `--yes` for automation. Best-effort: UX failures never break a config write that already persisted.
+- **mounts.ts**: 4 new verbs (enable / disable / trust-frontmatter / untrust-frontmatter) sharing the runSetMountFlag helper. MountEntry interface extended with `trust_frontmatter_overrides?: boolean` (default false; mounts opt in explicitly). loadMounts projection threads the field through. GBRAIN_MOUNTS_PATH env override added to both `mounts.ts` and `brain-registry.ts` getMountsPath() so tests don't fight libuv's cached homedir().
+- **sources.ts**: `set-cr-mode <id> <mode>` verb with isCRMode validation, "unset"/"default"/"" as the clear path, missing-source loud rejection with paste-ready `gbrain sources list` hint (closes the idempotent-pebble Failure Modes critical gap).
+- **brain-score-recommendations.ts**: Remediation lifted into the new src/core/remediation-step.ts module. Re-exports + back-compat alias preserved so existing callers keep compiling.
+- **doctor.ts**: Check.remediation field typed to RemediationStep[]. integrity + sync_failures checks emit RemediationSteps via makeRemediationStep when the warn fires. sync-skip-failed deliberately NOT emitted per codex D12 Bug 3 (auto-skip hides data loss).
+- **jobs.ts**: 3 new Minion handlers registered (lint-fix, integrity-auto, sync-retry-failed). Thin wrappers around already-shipping CLI commands; NOT in PROTECTED_JOB_NAMES (idempotent, no shell exec, MCP-safe).
+- **import-file.ts**: wraps chunks at embed time (D20-T1 separation), stamps the two CR-state columns alongside putPage.
+- **Race fix** (D24): `postgres-engine.ts` + `pglite-engine.ts` upsertChunks use `embedded_at` to break NULL→non-NULL ties. Closes the long-standing v0.35.x TODO.
+- **Mode bundle field** (`src/core/search/mode.ts`): `contextual_retrieval: CRMode` per tier + `contextual_retrieval_disabled` kill switch.
+
+### For contributors
+
+7 new test files (1093 LOC) + 5 extended test files:
+- `test/query-cache-gate.test.ts` (15 cases: pure validator branches + PGLite-backed snapshot builder + SQL shape regression).
+- `test/mode-switch-ux.test.ts` (18 cases: 5-cell transition matrix + 3-branch worker probe + 6-case content-stable idempotency-key invariance).
+- `test/mounts-cli.test.ts` (5 new cases: enable/disable cycle, trust/untrust cycle, missing-mount rejection, host rejection, idempotent enable).
+- `test/sources-set-cr-mode.test.ts` (10 cases: happy path × 3 modes, unset path × 2, invalid mode rejection, missing source rejection, missing args, round-trip preserves other fields).
+- `test/remediation-step.test.ts` (17 cases: canonical-JSON determinism, idempotency_key shape + invariance, makeRemediationStep factory, back-compat alias).
+- `test/e2e/cache-gate-pglite.test.ts` (6 cases: store→HIT, content UPDATE→MISS, INSERT new page→HIT codex #4 case, legacy row→HIT IRON-RULE, soft-delete→MISS, multi-page partial bump→MISS).
+- `test/e2e/capture-generation-regression.test.ts` (3 cases: INSERT path bumps MAX, UPDATE path bumps generation, idempotent re-capture does NOT bump).
+
+## To take advantage of v0.40.3.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor`
+warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Your agent reads `skills/migrations/v0.40.3.0.md` the next time you interact with it.**
+   The migration is mostly mechanical (schema + bootstrap probes); no agent-side action required beyond the optional `--mode tokenmax` opt-in.
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor
+   gbrain search "your favorite query"  # should hit cache on the 2nd run
+   ```
+4. **If you want to opt up to tokenmax (per-chunk Haiku synopsis):**
+   ```bash
+   gbrain config set search.mode tokenmax
+   # Mode-switch banner fires with cost preview + offers reindex submission.
+   ```
+5. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
 ## [0.40.2.0] - 2026-05-22
 
 **gbrain now uses the typed-claim timeline it's been quietly building to ground answers about what changed and when.** Ask `gbrain think` "when did Marco last switch jobs" or "what was the ARR in March" and the answer comes back rooted in a real chronological timeline of the metric facts your brain already extracted via the `extract_facts` cycle phase. The feature is on by default; flip `think.trajectory_enabled=false` to opt out.
@@ -72,7 +742,6 @@ The same plumbing lands in the LongMemEval benchmark, with a methodology change 
 ### Plan + reviews
 
 Plan file at `~/.claude/plans/system-instruction-you-are-working-crystalline-owl.md` carries the full design rationale, the CEO/Eng/Codex review history (3 review passes, all CLEARED), the measurement plan (3 seeds per condition + paired-bootstrap CI), and the hand-verification gate list. Codex flagged 18 findings during outside-voice review; 6 load-bearing ones folded as design decisions (alias-map wording, `resolveEntitySlugWithSource` resolution_source signal, prompt-placement preserving both calibration AND default ordering, INJECTION_PATTERNS extension for `</trajectory>`, 5s findTrajectory timeout + 10s extractor timeout, doctor check deferred to v0.40.1+, real-LLM spot-check added, success metric broadened). The benchmark methodology contamination was the load-bearing decision — accepted with explicit CHANGELOG + JSON-envelope disclosure.
-
 
 
 ## [0.40.1.0] - 2026-05-22

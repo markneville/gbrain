@@ -1541,11 +1541,11 @@ describe('migration v51 — facts_fence_columns (v0.32.2)', () => {
 // statement_timeout + idle_in_transaction_session_timeout delivered as
 // startup parameters kill those backends on the server side.
 
-describe('migration v90 — oauth_client_permissions', () => {
+describe('migration v93 — oauth_client_permissions', () => {
   test('exists with expected name and idempotent ALTER', () => {
     const migration = MIGRATIONS.find(m => m.name === 'oauth_client_permissions');
     expect(migration).toBeDefined();
-    expect(migration?.version).toBe(90);
+    expect(migration?.version).toBe(93);
     expect(migration?.sql).toContain('ALTER TABLE oauth_clients');
     expect(migration?.sql).toContain('ADD COLUMN IF NOT EXISTS permissions JSONB');
   });

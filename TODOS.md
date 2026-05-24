@@ -1,5 +1,256 @@
 # TODOS
 
+## v0.41+ wave commitments (decided 2026-05-23)
+
+Source: `/plan-ceo-review` + `/plan-eng-review` triage of TODOS as roadmap
+signal. Plan file: `~/.claude/plans/system-instruction-you-are-working-dazzling-pnueli.md`.
+Three strategic decisions landed and the 7 verified-absent items the
+analysis surfaced were approved for filing.
+
+### D1 — v0.41 Eval-loop wave (NEXT, P0)
+
+The eval/quality-gate cluster has all the substrate (eval_candidates table,
+`eval export/replay`, cross-modal runner, nightly probe, audit JSONL) but
+the LOOP is barely live. Three blocking moves turn "gbrain has eval infra"
+into "gbrain is self-improving."
+
+- [ ] **P0 — `gbrain eval gate <baseline.ndjson>` for CI.** The single most
+  load-bearing missing item across all 12 clusters. Fails the build on
+  regression vs the last published BrainBench-Real baseline. Without it,
+  every other eval surface is informational, not gating. Shape: reads
+  the captured/replay NDJSON shape from v0.25.0+, compares mean_jaccard +
+  top-1 stability against thresholds embedded in the baseline file, exits
+  non-zero on regression. Filed in the v0.40.1.0 Track D follow-up
+  ("v0.41+: contributor-mode CI capture for BrainBench-Real replay gate")
+  but that item describes the data pipeline; this item is the gate verb
+  itself. Effort: human ~1 day / CC ~2 hours once a stable baseline exists.
+
+- [ ] **P0 — Contributor-mode eval capture ON by default with airtight
+  privacy.** Today `eval.capture` defaults OFF; only contributors who
+  set `GBRAIN_CONTRIBUTOR_MODE=1` produce `eval_candidates` rows. Without
+  capture flowing, replay-against-baseline gates have nothing to replay
+  AGAINST in production. Move: harden the PII scrubber (verify Luhn
+  card-number false-positive rate, audit JWT-shape regex, document
+  every scrub class), then flip the default. Add a one-line opt-out
+  banner on first `gbrain init` post-upgrade. Cross-reference the
+  `eval_capture_failures.reason` enum cleanup from the v0.25.0 P1 surgical
+  hardenings list. Effort: human ~3 days / CC ~3 hours.
+
+- [ ] **P0 — Wire nightly quality probe into autopilot scheduler.** The
+  phase ships callable (`src/core/cycle/nightly-quality-probe.ts`) with
+  full DI surface; doctor surfaces outcomes; the audit JSONL rotates
+  cleanly. What's NOT wired: `src/commands/autopilot.ts` doesn't invoke
+  `runNightlyQualityProbe(deps)` on its 24h cadence. Add the phase
+  trigger; honor `autopilot.nightly_quality_probe.enabled` config gate.
+  Already filed in v0.40.1.0 Track D follow-ups — re-filing here as P0
+  with explicit D1-wave dependency. Effort: human ~3 hours / CC ~30 min.
+
+### D2 — Code-indexing promoted to P1 (peer of Cursor/Sourcegraph)
+
+Decision: gbrain commits to being a code-brain peer of dedicated tools,
+not "knowledge brain that also indexes code." The five code-indexing
+TODOs below promoted from P2/P3 to P1. Plan reference: v0.21 Code
+Cathedral II was the last big push; this wave revives the trajectory.
+
+- [ ] **P1 — `.sql` file indexing (#1173).** Vendor `tree-sitter-sql.wasm`
+  into `src/assets/wasm/grammars/`, extend sync walker's extension filter
+  to include `.sql`, route through `importCodeFile()` with
+  `page_kind='code'`. Verify-first slug round-trip before merging (codex
+  CF11 from v0.37.7.0). Pre-existing entry under v0.37.7.0 follow-ups
+  — keep that one, this is just the priority bump.
+- [ ] **P1 — Magika auto-detect for extension-less files (B2 from v0.21).**
+  Bundle Google's Magika ONNX (~1MB) as an asset; wire into
+  `detectCodeLanguage` as fallback for Dockerfile / Makefile / .envrc
+  / shell scripts. Hook already exists (`setLanguageFallback` in
+  `src/core/chunkers/code.ts`). Closes the last common extension-less case.
+- [ ] **P1 — Full `doc_comment` extraction at chunk time (A4 from v0.21).**
+  Per-language detection of comment-blocks-preceding-declarations
+  (JSDoc, Python docstrings, C-style doc comments). Populates
+  `content_chunks.doc_comment`. FTS trigger from Layer 1b already
+  weights doc_comment 'A' above chunk_text 'B' — ranking is ready, only
+  extraction is missing. Material MRR lift on natural-language code
+  queries.
+- [ ] **P1 — Cross-file edge resolution (Layer 5 precision upgrade).**
+  Second-pass resolution after all code files import: walk every
+  `code_edges_symbol` row, try to resolve `to_symbol_qualified` via
+  `symbol_name_qualified` join within the same source. Today
+  `getCallersOf("searchKeyword")` returns Layer 6 ambiguity — every
+  call site in any class. Receiver-type inference lifts this. Per-language;
+  TypeScript-first.
+- [ ] **P1 — gbrain code-signature retrieval (C6 from v0.21).** "Find every
+  function whose signature returns `Promise<User>`" or "(string, number)
+  => boolean". Type-signature retrieval via tree-sitter type captures.
+  Per-language stretch; TypeScript-first.
+
+### D3 — v0.42 Non-Latin script wave (global by design)
+
+Decision: gbrain commits to first-class non-Latin support. The five
+existing "defer until first user complains" entries get consolidated
+into one committed wave with a target version.
+
+- [ ] **v0.42 — Postgres CJK FTS via pgroonga / zhparser / ngram trigrams.**
+  Multi-tenant Postgres deployments hit empty results for CJK queries
+  because `to_tsvector('english', ...)` can't segment Chinese / Japanese
+  / Korean. Plan: doctor advisory pointing at extension docs;
+  searchKeyword falls through to PGLite-style ILIKE when extension
+  isn't installed. v0.32.7 closed PGLite-side; this closes Postgres-side.
+- [ ] **v0.42 — Widen CJK ranges to Unicode property escapes.** Today
+  `src/core/cjk.ts` uses BMP-only ranges. Misses Han Extensions A/B/C,
+  halfwidth katakana, compatibility ideographs, iteration marks `々` `〇`.
+  Switch to `\p{Script=Han}` / `\p{Script=Hiragana}` / `\p{Script=Katakana}`
+  / `\p{Script=Hangul}`. Astral-plane support also requires
+  `Array.from(str)` codepoint iteration in chunker's char-slice fallback.
+- [ ] **v0.42 — CJK-aware overlap context in chunker.** `extractTrailingContext`
+  is whitespace-token-based today; CJK chunks under maxChars cap have no
+  useful overlap with previous chunk. Switch to char-count when
+  `countCJKAwareWords` would have triggered the CJK branch.
+- [ ] **v0.42 — Thai / Arabic / Cyrillic / Devanagari script support.**
+  Same five-layer fix pattern as CJK: slugify ranges, chunker density
+  threshold, PGLite keyword fallback with script-aware tokenization.
+- [ ] **v0.42 — `git diff --name-status -z` + NUL framing.** v0.32.7
+  added `core.quotepath=false` which handles non-ASCII paths but doesn't
+  cover tabs, newlines, or quotes in filenames. NUL-byte path framing
+  is the robust fix for the whole encoding class. Affects
+  `src/commands/sync.ts:buildDetachedWorkingTreeManifest` +
+  `buildSyncManifest`.
+
+### Verified-missing items — filed into TODOS (P2 unless noted)
+
+Each grep-verified absent before being claimed missing. Priority per the
+cluster the item sits in. Filed here together for traceability; future
+cleanup can move each into the relevant area section.
+
+- [ ] **P2 — `gbrain sources promote <id> <target-source>`** — write-side
+  counterpart to mounting. Today federation is read-side only; promotion
+  is the unfiled symmetric verb. (Federation cluster.)
+- [ ] **P2 — `--explain` auto-on during `gbrain eval replay`** — so
+  regression reports show WHY a page dropped from top-3, not just THAT
+  it did. (Search-quality cluster.)
+- [ ] **P2 — Extend `gbrain remote doctor` to stream brain's audit JSONL
+  summaries.** Closes the local/remote observability split-brain
+  (T-todo-3 from v0.40.4 covers the DB-table side; this is the read-side
+  surface). (Observability cluster.)
+- [ ] **P2 — `gbrain costs`** — surfaces per-command, per-source, per-week
+  spend. Data is in audit JSONL already; nothing reads it together.
+  Pairs naturally with the P5 budgets config block from the v0.37 lsd
+  cost-explosion follow-up. (Observability cluster.)
+- [ ] **P2 — `gbrain jobs explain <id>`** — full job-graph trace (parent
+  → children → tools called → tokens spent → outcome). Today
+  `gbrain agent logs <id>` covers subagents but not the broader job
+  graph. (Worker cluster.)
+- [ ] **P2 — `docs/security/threat-model.md`** — catalog every untrusted
+  boundary in gbrain (MCP, OAuth, capture, sync remote URLs, file_upload,
+  webhook ingest, subagent tool dispatch) and link each to its defense.
+  Defenses exist (v0.26.5 destructive-guard, v0.26.7 OAuth hardening,
+  v0.34.1 source-isolation P0 seal, v0.36 SSRF); the catalog does not.
+  Verified absent: `docs/security/` directory doesn't exist.
+  (Safety cluster.)
+- [ ] **P3 — `gbrain doctor --thin-client` parity probe** — compares
+  the same query against local PGLite vs remote HTTP MCP and surfaces
+  behavior drift. Static parity test (filed in v0.31.x follow-ups)
+  catches API drift; this catches behavior drift. (Agent ergonomics cluster.)
+- [ ] **P3 — `gbrain models migrate --from openai:text-embedding-3-large
+  --to voyage:voyage-3-large`** — estimates cost, schedules re-embed
+  via Minion job, swaps active column atomically. Column-registry
+  primitive exists (`embedding_columns` from v0.36.3); migration verb
+  doesn't. (Embedding cluster.)
+
+---
+## v0.40.7.0 Schema Cathedral v3 follow-ups (v0.40.7+)
+
+These were filed when v0.40.7.0 closed PR #1321's design as a production
+rebuild. The wave shipped the 9 MCP ops + 14 CLI verbs + atomic mutation
+primitives + skill on-ramp; three wiring sites were larger than expected
+at plan time and got carved out:
+
+- [ ] **v0.40.7+: enrichment-service.ts union widening (`'person' | 'company'` → `string`).**
+  `src/core/enrichment-service.ts` hard-codes the `entityType` union in 6
+  sites (`:25`, `:48`, `:60`, `:238`, `:246`, + caller mappings). Widening
+  to `string` and threading the active pack's path_prefixes through
+  `slugifyEntity` closes the T1.5 silent-no-op bug for the enrichment
+  pipeline. Estimated 2 hours CC. Third T1.5 wiring site (whoknows +
+  find_experts MCP already wired in v0.40.7.0).
+
+- [ ] **v0.40.7+: facts/eligibility.ts pack-aware ELIGIBLE_TYPES wiring.**
+  `src/core/facts/eligibility.ts:49` defines a hardcoded `ELIGIBLE_TYPES`
+  array. Should consult `extractableTypesFromPack(pack)`. Behavioral
+  change: every brain's extraction surface changes once wired, so needs
+  careful verification.
+
+- [ ] **v0.40.7+: three doctor checks for schema pack health.**
+  `schema_pack_coverage` (warn >10%, fail >30% untyped on non-default
+  pack), `schema_pack_writability` (reads schema-mutations audit JSONL
+  for PACK_READONLY failures), `schema_pack_mutation_audit` (anomalous
+  patterns like >20 mutations/week). All warn-only; reuse
+  `summarizeMutations()` for cross-surface parity. Audit log shipped
+  with the right shape so these drop in cleanly.
+
+- [ ] **v0.40.7+: T16 — hermetic schema-authoring eval gate.**
+  Extend `src/commands/eval-schema-authoring.ts` into a PGLite harness
+  driving detect → suggest → add-type → sync end-to-end on 3 fixtures.
+  Filing-accuracy delta metric (not top-3 hit rate per codex C18). DI
+  seam via `suggestFn`. 3 hours CC + placeholder-name fixtures.
+
+- [ ] **v0.40.7+: T16.1 — separate "suggest top-3 hit rate" eval.**
+  Different question from T16. ~2 hours CC.
+
+- [ ] **v0.41+: T19 — per-source federated read closure across mounts.**
+  Trust gate today rejects divergent-pack federated reads
+  (`op-trust-gate.ts:111-116`). Real fix needs per-source SQL closure
+  via `buildPerSourceBindings`. Document workaround: register
+  source-scoped OAuth clients.
+
+- [ ] **v0.41+: T20 — extends-chain merging in registry.ts.**
+  `registry.ts:167` documents the gap. Implementing full child-wins
+  merge cascades through every consumer of `manifest.page_types`. ~1
+  day CC.
+
+- [ ] **v0.41+: T21 — comment-preserving YAML emitter.**
+  v0.40.7.0 emitter does NOT preserve comments. Authors who care
+  pin pack.json. Replacing with a comment-aware library is the proper
+  fix.
+
+- [ ] **v0.41+: T22 — admin SPA tab for schema verbs.**
+  CLI + MCP only this wave.
+
+- [ ] **v0.41+: T23 — finer-grained `schema:write` OAuth scope.**
+  Today the write ops gate on `admin`. Splitting `admin → admin +
+  schema:write` is a cross-cutting refactor.
+
+- [ ] **v0.41+: T24 — multi-tenant pack federation in a single brain.**
+  One active pack per source remains.
+
+## v0.40.3.0 follow-ups (v0.41+)
+
+- [ ] **v0.41+: source-scope the `sync-failures.jsonl` log so `--skip-failed` works under `--parallel > 1`.**
+  v0.40.3.0 shipped `gbrain sync --all --parallel N` as a continuous worker pool
+  with per-source DB locks. The remaining unsafe path: `recordSyncFailures()` /
+  `acknowledgeSyncFailures()` in `src/core/sync.ts` write to a brain-global JSONL
+  file at `~/.gbrain/sync-failures.jsonl` with no per-source scope. Under parallel
+  sync, source A's `--skip-failed` ack can swallow source B's failures recorded
+  while B was still running. v0.40.3.0's safe interim: refuse to combine
+  `--skip-failed` / `--retry-failed` with `--parallel > 1` (loud error, paste-ready
+  hint pointing at `--parallel 1`). The proper fix: (1) extend the JSONL row
+  schema with a `source_id` field; (2) `recordSyncFailures(failures, sourceId)`
+  stamps the field; (3) `acknowledgeSyncFailures({sourceId})` filters acks to
+  one source's rows; (4) `unacknowledgedSyncFailures({sourceId})` reads the
+  subset. Drop the v0.40.3.0 restriction once source-scoped acks are
+  deterministic. Estimate: ~1-2 days. Filed during v0.40.3.0 plan review by
+  Codex outside-voice (decision D15 → B in the eng-review plan at
+  `~/.claude/plans/system-instruction-you-are-working-fluttering-grove.md`).
+
+- [ ] **v0.41+ (optional): extend `checkSyncFreshness` to include `embedding_coverage_pct`
+  per source.** v0.40.3.0 plan originally proposed adding a NEW doctor check
+  `sync_freshness_per_source` consuming `buildSyncStatusReport`. Codex caught
+  that `checkSyncFreshness` (`src/commands/doctor.ts:~1609`) is ALREADY per-source —
+  iterates `WHERE local_path IS NOT NULL`, emits per-source messages with
+  paste-ready `gbrain sync --source <id>` hints, warns at 24h, fails at 72h.
+  The plan dropped the duplicate (D9 → A). The real follow-up is to extend
+  `checkSyncFreshness`'s message to include `embedding_coverage_pct` per source
+  alongside the staleness number so doctor surfaces the coverage gap inline.
+  Implementation: reuse `buildSyncStatusReport` from `src/commands/sync.ts`,
+
+
 ## v0.40.1.0 Track D follow-ups (v0.41+)
 
 - [ ] **v0.41+: contributor-mode CI capture for BrainBench-Real replay gate.**
@@ -42,6 +293,45 @@
   Doctor surface is already in place to show outcomes; just need the
   scheduling lane. Estimate: ~3 hours.
 
+## v0.41+ e2e-test-wave follow-ups (filed during v0.40.8.0 ship)
+
+- [ ] **NEW-1 (P2) — Per-check leaf unit tests for the 20+ exported doctor check functions.** `src/commands/doctor.ts:169-1492` exports whoknowsHealthCheck, takesWeightGridCheck, childTableOrphansCheck, checkRerankerHealth, checkBrainstormHealth, checkSearchMode, checkEvalDrift, checkSyncFreshness, checkAbandonedThreads, checkCalibrationFreshness, checkGradeConfidenceDrift, checkVoiceGateHealth, checkZeEmbeddingHealth, checkEmbeddingWidthConsistency, checkSourceRoutingHealth, checkOauthConfidentialHealth, checkAutopilotLockScope, skillBrainFirstCheck. v0.40.8.0 covers them via the orchestrator only. Parameterize a single `test/doctor-leaves.test.ts` over the exported functions; each case seeds the minimum DB state and asserts the returned `Check.status`. Catches per-check render bugs the orchestrator snapshot can't see (codex CMT-2 deep fix). Estimated ~4h CC.
+- [ ] **NEW-2 (P2) — Cycle-phase wrappers beyond lint + backlinks.** 7 more phases need result-mapping coverage: sync, extract, embed, orphans, extract_facts, resolve_symbol_edges, recompute_emotional_weight. Each adds a describe block to `test/cycle-legacy-phases.test.ts` following the established pattern. ~30min/phase with CC. Mechanical follow-through.
+- [ ] **NEW-3 (P2) — HTTP-level trust-boundary test that proves serve-http.ts honors the filter at runtime.** v0.40.8.0 ships the source-grep guard at `scripts/check-operations-filter-bypass.sh` plus structural assertions in `test/operations-trust-boundary.test.ts`. The codex CMT-3 strongest defense — runtime proof that a register-OAuth-client → attempt-call-every-localOnly-op flow rejects every one — would extend `test/e2e/serve-http-oauth.test.ts`. Real Postgres dep, ~30s wallclock per case. Closes the bypass class with runtime proof in addition to the existing structural defense.
+- [ ] **NEW-4 (P3) — Render function extraction from runDoctor.** v0.40.8.0 uses a subprocess smoke at `test/doctor-cli-smoke.serial.test.ts` to cover the wrapper's render + exit paths. Pulling the human + JSON render code out into pure formatters would let that smoke move back into the parallel fast loop with no subprocess overhead. ~2h CC. Lower priority — the subprocess smoke does its job; this is a wallclock win, not a coverage win.
+
+## v0.41+ master flake follow-ups (filed during v0.40.8.0 ship)
+
+- [ ] **(P3) — Audit other gateway-mutating tests for missing afterAll cleanup.** v0.40.8.0 added `afterAll(() => resetGateway())` to `test/ai/gateway.test.ts` and quarantined `test/ai/header-transport.test.ts` as `.serial.test.ts`. Two other files mutate gateway state without an explicit cleanup hook: `test/ai/rerank.test.ts`, `test/gateway-embed-model-override.test.ts`. They haven't surfaced flakes yet (different test sequences), but they're the same risk class. Add `afterAll(() => resetGateway())` to both for defense-in-depth, or quarantine if they prove racy under future parallelism changes.
+## v0.40.4 adversarial review LOW findings — captured for v0.41+
+
+- [ ] **Codex L1**: `gbrain search stats --days N` underreports for N > 7. audit-writer.ts reads only current + previous ISO week (~14 days). `--days 30` silently shows ~2 weeks of failure events. Fix shape: extend readRecent to walk N/7 weeks dynamically OR cap user input with a clear message.
+- [ ] **Claude F2**: Score compounding on repeat applyGraphSignals invocation. The boost stages aren't idempotent on `r.score`; only `base_score` has explicit pre-stamp idempotency. If a future caller invokes runPostFusionStages twice on the same SearchResult array (retry loop, cache-augmentation path), scores compound `score * ADJACENCY_BOOST * ADJACENCY_BOOST`. Same hole in applyBacklinkBoost/Salience/Recency. Document the "call once" contract OR add an `already_applied` guard.
+- [ ] **Claude F3**: NaN handling asymmetry. applyBacklinkBoost explicitly guards `if (!Number.isFinite(r.score)) continue` (hybrid.ts:82). applyGraphSignals does NOT — only the floor-threshold guard. With floor_ratio undefined (default), NaN scores get `NaN * 1.05 = NaN`. ECMAScript sort with NaN comparator is undefined behavior. Add the same `Number.isFinite(r.score)` guard.
+- [ ] **Claude F5**: Doctor's `linkedRows` coverage query overcounts via soft-deleted source pages. The JOIN filters TO page on deleted_at but not FROM page. Coverage metric overstates link density relative to what graph-signals actually fires on. Fix: add `WHERE l.from_page_id IN (SELECT id FROM pages WHERE deleted_at IS NULL)` or equivalent.
+- [ ] **Claude F6**: ANSI / control-char injection via slug or path into stderr + --explain output. audit-slug-fallback writes user-derived `sourcePath`/`slug` unfiltered. explain-formatter renders `graph_session_prefix` (slug-derived) unfiltered. Slug validation in import-file may strip these but defense-in-depth at log/render sites is missing.
+- [ ] **Claude F7**: JSONL concurrent-append byte interleaving on large events. `appendFileSync` is atomic only when write size ≤ PIPE_BUF (~4096 bytes Linux). Supervisor audit rows can exceed this. Corrupt rows silently dropped via JSON.parse-in-catch. Fix shape: write to staging file + rename, or use fcntl advisory lock around append.
+- [ ] **Claude F8**: Audit files never pruned. 6 audit types × 52 weeks/year = 312+ files. Long-running installs accumulate disk/inode pressure. Add `cleanupOldFiles(retentionDays)` to audit-writer and wire into doctor's purge phase OR autopilot weekly maintenance.
+- [ ] **Claude F11**: Source-scope contract on getAdjacencyBoosts is JSDoc-only, no runtime check. Defensive `deleted_at IS NULL` was codified post-review; same defense pattern should apply to source-scope (the v0.34.1 source-isolation seal class). Add optional `sourceId` param that asserts at runtime, OR add a test-only contract checker.
+- [ ] **Claude F12**: `require('./core/search/explain-formatter.ts')` in cli.ts:576 is CommonJS. Repo is ESM. Switch to `await import(...)` for consistency with the file's other lazy-imports.
+- [ ] **Claude F14**: Telemetry undercounts on cache hit. onScoreDistribution and onGraphMeta fire ONLY in runPostFusionStages which runs ONLY in bare hybridSearch (not cache hit). Doctor's graph_signals_coverage decisions based on absent fire data on high-cache-hit installs.
+- [ ] **Claude F16**: src/core/skillpack/audit.ts carries duplicate ISO-week filename math. Refactor onto createAuditWriter for parity with the 5 audits unified in v0.40.4 T2.
+
+## Pre-existing flake on master (noticed during v0.40.4 ship)
+
+- [ ] **`test/search/embedding-column.test.ts:466,489,522` — `isCacheSafe` returns false when run after gateway-state-mutating siblings in shard 2.** Confirmed pre-existing on master (`git stash` + `SHARD=2/8 bash scripts/run-unit-shard.sh` reproduces 3 fails on a clean working tree). Symptom: `isCacheSafe(default-named-column, empty-cfg)` expects `gwDims=1536` but reads `1280` (the post-v0.37.11.0 ZeroEntropy default). Some test in the shard before embedding-column.test.ts initializes the gateway with the PGLite-default ZeroEntropy/1280 config and leaves it that way. Either: (a) embedding-column.test.ts grows a `beforeEach` that calls `__setEmbedTransportForTests`-style reset, (b) the offending sibling adds an `afterAll(reset)`, or (c) embedding-column.test.ts becomes `*.serial.test.ts` to quarantine. Three test files in shard 2 touch gateway state via PGLite engine connects: `restart-sweep.test.ts`, `init-mode-picker.test.ts`, `doctor.test.ts`. Tests pass in isolation (50/50); only fail under shard-2 ordering. v0.40.4 ships through this flake — not introduced by the wave.
+
+## v0.40.4 graph signals — deferred follow-ups (v0.41+)
+
+- [ ] **T-todo-1: profile graph-signal SQL latency at scale + merge backlink + adjacency if hot.** Today `getBacklinkCounts` and `getAdjacencyBoosts` both hit the `links` table inside `runPostFusionStages` — two round-trips that share an index. If profiling on Garry's actual brain shows the two-round-trip cost dominates graph-signal stage latency (>5ms p99), merge into `getLinkAggregates(slugs, pageIds)` returning both backlink counts AND adjacency aggregates in one SQL. D8=C deferred this until real production data justifies it. Trigger: `gbrain search stats` shows graph-signal stage p99 > 5ms over a 7-day window.
+
+- [ ] **T-todo-2: magnitude calibration wave from 30 days of score-distribution probe data.** v0.40.4 ships conservative magnitudes (ADJACENCY_BOOST=1.05, CROSS_SOURCE_BOOST=1.10, SESSION_DEMOTE=0.95) under the floor-gate. The `onScoreDistribution` probe emits min/p25/p50/p75/p95/max + reorder_band_width on every query. After 30 days, read the cumulative distribution from search-stats telemetry, compute the actual reorder bands the boosts have to clear, and tune the three constants against real data. Today's values are vibes-driven (D14=B); the probe instrumentation is the cathedral, the calibration wave is the payoff.
+
+- [ ] **T-todo-3: move fail-open audit events to a DB table for cross-deploy observability.** Codex outside-voice #15 caught the split-brain observability: graph-signals failures land in `~/.gbrain/audit/graph-signals-failures-*.jsonl`, but `gbrain serve --http` deploys can't read the host JSONL. `gbrain search stats` shows error counts on local but not on remote-server brains. Right shape: add a small `event_log` table (or extend an existing one) that the shared `createAuditWriter` writes to alongside the JSONL when an engine is available. Doctor + search-stats read from DB on remote, fall back to JSONL on local. Affects all 6 audit modules (rerank, shell, supervisor, slug-fallback, phantom, graph-signals), so this is a v0.41 audit-infra wave, not a one-off.
+
+- [ ] **T-todo-4: sync-topology-aware cross-source signal.** Codex outside-voice #11 + #15 caught: `cross_source_hits` today counts ANY page in another source as cross-team corroboration, but mirrored imports from another source look identical to genuine cross-team links. Distinguishing them likely needs a `link_source_type` enum extension (e.g. `'mirror'` flag on links created during a `gbrain sources sync`) so the SQL can filter `cross_source_hits` to genuine team-authored edges only.
+
+- [ ] **T-todo-5: replace doctor's 30% global density threshold with actual fire-rate measurement.** `checkGraphSignalsCoverage` in doctor uses % pages with ≥1 inbound link as a proxy for "graph signals fire often enough to matter." Codex outside-voice #14 caught: this is global density, not top-K subgraph density. After 30 days of `gbrain search stats` data accumulates per-query fire rates (T-todo-2 wires this), swap the doctor check to read actual fire-rate-over-window. The 30% threshold becomes "fired in ≥10% of queries in last 7 days" or similar — measured, not inferred.
 ## v0.39.3.0 smoke-test wave — deferred follow-ups (v0.39.4 / v0.40)
 
 - [ ] **v0.40: SQL-shape rewrite of `listPrefixSampledPages` for PgBouncer transaction-mode compatibility.** WARN-10 root cause from the v0.38.0.0 smoke test: brainstorm + lsd consistently exceed Postgres `statement_timeout` (often PgBouncer-imposed) on the prefix-stratified domain bank query when the brain has >10K pages spread across many prefixes. v0.39.3.0 ships diagnostic surfacing only (the orchestrator wrap classifies SQLSTATE 57014 into a `StructuredAgentError` with a friendly hint). Real fix: per-prefix limit pushdown, embeddings prefetch, or breaking the single big query into a series of small ones across an explicit cursor. Plan: `~/.claude/plans/system-instruction-you-are-working-async-popcorn.md` (Phase 5, WARN-10 row). Owner: open.
