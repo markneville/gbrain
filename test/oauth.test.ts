@@ -215,7 +215,7 @@ describe('verifyAccessToken', () => {
       'mackie-test', ['client_credentials'], 'read write', [],
       { holder: 'mackie', takesHolders: ['world', 'mackie'] },
     );
-    const tokens = await provider.exchangeClientCredentials(clientId, clientSecret, 'read');
+    const tokens = await provider.exchangeClientCredentials(clientId, clientSecret!, 'read');
     const authInfo = await provider.verifyAccessToken(tokens.access_token) as any;
 
     expect(authInfo.clientId).toBe(clientId);
