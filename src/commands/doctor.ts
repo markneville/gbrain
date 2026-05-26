@@ -563,6 +563,15 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
     checks.push({ name: 'queue_health', status: 'ok', message: 'PGLite — no queue to check' });
   }
 
+  // v0.41 Bug 2 / Eng D8 — subagent_health surfaces rate-lease pressure to the operator.
+  checks.push(await checkSubagentHealth(engine));
+
+  // v0.41.2.1 — embedding_env_override (cross-surface parity with
+  // buildChecks). Surfaces when GBRAIN_EMBEDDING_* env vars disagree
+  // with DB config; closes the silent-override class that caused the
+  // 716K-chunk damage incident from PR #1421's description.
+  checks.push(await checkEmbeddingEnvOverride(engine));
+
   // v0.31.12 subagent runtime enforcement (Layer 3 of 3 — Codex F13).
   // The subagent loop is Anthropic-only. If models.tier.subagent or
   // models.default is explicitly set to a non-Anthropic provider, warn here
@@ -852,6 +861,77 @@ export async function checkGradeConfidenceDrift(engine: BrainEngine): Promise<Ch
  * isolation (template fallback is fine), but a sustained high rate signals
  * the rubric needs tuning.
  */
+/**
+ * v0.41 Bug 2 / Eng D8 — surfaces rate-lease pressure from
+ * `minion_lease_pressure_log` (populated by the worker's lease-full bypass
+ * path). The operator's primary forensic signal for "is the lease cap too
+ * tight" — without this check, the v0.41 bypass would be invisible (no
+ * dead-letter, but also no operator awareness).
+ *
+ * Thresholds (windowed at 24h):
+ *   0 bounces                                            → ok ("no pressure")
+ *   1-99 bounces                                         → ok ("transient")
+ *   100+ bounces + subagent jobs completed in same window → ok ("healthy backpressure")
+ *   100+ bounces + ZERO completed subagent jobs           → warn (paste-ready cap-raise hint)
+ *   1000+ bounces                                        → fail ("blocking real work")
+ *
+ * Works on both Postgres + PGLite (migration v94 creates the table on both).
+ * Pre-v93 brains (no table) silently skip with an OK message.
+ */
+export async function checkSubagentHealth(engine: BrainEngine): Promise<Check> {
+  try {
+    const bounceRows = await engine.executeRaw<{ count: string }>(
+      `SELECT count(*)::text AS count FROM minion_lease_pressure_log
+        WHERE bounced_at > now() - interval '24 hours'`,
+    );
+    const bounces = parseInt(bounceRows[0]?.count ?? '0', 10);
+    if (bounces === 0) {
+      return {
+        name: 'subagent_health',
+        status: 'ok',
+        message: 'No rate-lease pressure in last 24h',
+      };
+    }
+    if (bounces >= 1000) {
+      return {
+        name: 'subagent_health',
+        status: 'fail',
+        message: `${bounces} lease-pressure bounces in last 24h — this is blocking real work. Raise the cap: \`export GBRAIN_ANTHROPIC_MAX_INFLIGHT=64\` (or \`unlimited\` for Azure / Bedrock / self-hosted upstreams with no provider-side rate limit). After raising, restart \`gbrain jobs work\`.`,
+      };
+    }
+    // 1-999 bounces: cross-check forward progress.
+    const completedRows = await engine.executeRaw<{ count: string }>(
+      `SELECT count(*)::text AS count FROM minion_jobs
+        WHERE finished_at > now() - interval '24 hours'
+          AND status = 'completed'
+          AND name = 'subagent'`,
+    ).catch(() => [{ count: '0' }]);
+    const completed = parseInt(completedRows[0]?.count ?? '0', 10);
+    if (bounces >= 100 && completed === 0) {
+      return {
+        name: 'subagent_health',
+        status: 'warn',
+        message: `${bounces} lease-pressure bounces in last 24h with no completed subagent jobs — cap is too tight. Raise via \`export GBRAIN_ANTHROPIC_MAX_INFLIGHT=64\` (or \`unlimited\` for upstreams with no provider-side cap).`,
+      };
+    }
+    return {
+      name: 'subagent_health',
+      status: 'ok',
+      message: `Lease pressure: ${bounces} bounces in last 24h, ${completed} subagent jobs completed — backpressure is binding but throughput is healthy`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (process.env.GBRAIN_DEBUG === '1') {
+      process.stderr.write(`[doctor] subagent_health skipped: ${msg}\n`);
+    }
+    return {
+      name: 'subagent_health',
+      status: 'ok',
+      message: 'Skipped (minion_lease_pressure_log unavailable — pre-v0.41 brain)',
+    };
+  }
+}
+
 export async function checkVoiceGateHealth(engine: BrainEngine): Promise<Check> {
   try {
     const rows = await engine.executeRaw<{ total: number; failures: number }>(
@@ -1566,6 +1646,58 @@ export function checkAutopilotLockScope(): Check {
 }
 
 /**
+ * v0.41.6.0 D3 — stale_locks doctor check.
+ *
+ * Surfaces every row in `gbrain_cycle_locks` whose `ttl_expires_at < NOW()`.
+ * The TTL is the canonical staleness signal already trusted by
+ * tryAcquireDbLock's UPDATE-on-conflict SQL — when TTL is in the past,
+ * the next acquire attempt will sweep the row anyway. Doctor's job is to
+ * warn the user proactively so the next sync doesn't get a surprise
+ * "Another sync is in progress" with no fix hint.
+ *
+ * Paste-ready hint per stale lock: names the source-id from the
+ * `gbrain-sync:<source>` lock-key shape so users can copy-paste the
+ * exact recovery command.
+ *
+ * Out of scope (filed as v0.41+ follow-up TODO): detection of
+ * "wedged but TTL-refreshing" locks where a refresh thread is alive
+ * but the main work is blocked. Requires explicit heartbeat probe;
+ * speculation until production data shows the case.
+ */
+export async function checkStaleLocks(engine: BrainEngine): Promise<Check> {
+  try {
+    const { listStaleLocks } = await import('../core/db-lock.ts');
+    const stale = await listStaleLocks(engine);
+    if (stale.length === 0) {
+      return { name: 'stale_locks', status: 'ok', message: 'No stale locks (no rows with ttl_expires_at < NOW())' };
+    }
+    const lines = stale.slice(0, 10).map(s => {
+      const ageH = Math.floor(s.age_ms / 3600_000);
+      const source = s.id.startsWith('gbrain-sync:') ? s.id.slice('gbrain-sync:'.length) : null;
+      const breakHint = source ? `gbrain sync --break-lock --source ${source}` : `gbrain sync --break-lock`;
+      return `  ${s.id} (pid ${s.holder_pid} on ${s.holder_host}, age ${ageH}h) → ${breakHint}`;
+    });
+    const tail = stale.length > 10 ? `  ... and ${stale.length - 10} more.` : null;
+    return {
+      name: 'stale_locks',
+      status: 'warn',
+      message: [
+        `${stale.length} stale lock(s) detected (ttl_expires_at < NOW()):`,
+        ...lines,
+        tail,
+      ].filter(Boolean).join('\n'),
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Pre-v0.30 brains may not have the gbrain_cycle_locks table yet.
+    if (/relation .* does not exist|no such table/i.test(msg)) {
+      return { name: 'stale_locks', status: 'ok', message: 'gbrain_cycle_locks table not yet provisioned (skipping)' };
+    }
+    return { name: 'stale_locks', status: 'warn', message: `Check failed: ${msg}` };
+  }
+}
+
+/**
  * v0.38 — cycle_phase_scope check (informational).
  *
  * Renders the static `PHASE_SCOPE` taxonomy from `src/core/cycle.ts` so
@@ -1697,6 +1829,75 @@ export async function checkEvalDrift(engine: BrainEngine): Promise<Check> {
  * the loop at runtime. This check makes the configuration drift visible
  * before a job is submitted.
  */
+
+/**
+ * v0.41.2.1 — embedding_env_override (D9 #9). Defense-in-depth for the
+ * ze-switch env-override class (the 716K-chunk damage incident from
+ * PR #1421's description).
+ *
+ * GBRAIN_EMBEDDING_MODEL / GBRAIN_EMBEDDING_DIMENSIONS win over DB+file
+ * config in loadConfig(). When env disagrees with DB, the gateway embeds
+ * with the env-selected model — even after ze-switch wrote a different
+ * value to DB. This check surfaces that disagreement on every hourly
+ * doctor run so users can spot the drift before the embed sweep corrupts
+ * vectors at the wrong width.
+ *
+ * Uses Check.details (NOT Check.issues, which has a different schema)
+ * so the structured `mismatches[]` payload is consumable by monitoring
+ * pipelines without ad-hoc type widening.
+ *
+ * Cross-surface parity: wired into BOTH buildChecks() and
+ * doctorReportRemote() — operators running thin-client doctor against
+ * a remote brain see the server's env, which is the env that matters
+ * for the embed pipeline running there.
+ */
+async function checkEmbeddingEnvOverride(engine: BrainEngine): Promise<Check> {
+  const envModel = process.env.GBRAIN_EMBEDDING_MODEL?.trim();
+  const envDim = process.env.GBRAIN_EMBEDDING_DIMENSIONS?.trim();
+  if (!envModel && !envDim) {
+    return {
+      name: 'embedding_env_override',
+      status: 'ok',
+      message: 'no embedding env overrides set',
+    };
+  }
+  let dbModel: string | null = null;
+  let dbDim: string | null = null;
+  try {
+    dbModel = await engine.getConfig('embedding_model');
+    dbDim = await engine.getConfig('embedding_dimensions');
+  } catch (err) {
+    return {
+      name: 'embedding_env_override',
+      status: 'warn',
+      message: `couldn't read DB config to compare env: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const mismatches: Array<{ key: string; env: string; db: string }> = [];
+  if (envModel && dbModel && envModel !== dbModel) {
+    mismatches.push({ key: 'GBRAIN_EMBEDDING_MODEL', env: envModel, db: dbModel });
+  }
+  if (envDim && dbDim && envDim !== dbDim) {
+    mismatches.push({ key: 'GBRAIN_EMBEDDING_DIMENSIONS', env: envDim, db: dbDim });
+  }
+  if (mismatches.length === 0) {
+    return {
+      name: 'embedding_env_override',
+      status: 'ok',
+      message: 'env vars agree with DB config',
+    };
+  }
+  return {
+    name: 'embedding_env_override',
+    status: 'warn',
+    message:
+      `${mismatches.length} embedding env var(s) disagree with DB config (env wins at runtime). ` +
+      `Fix: \`unset ${mismatches.map((m) => m.key).join(' ')}\` in your shell profile / .env, ` +
+      `or update DB config to match.`,
+    details: { mismatches },
+  };
+}
+
 async function checkSubagentCapability(engine: BrainEngine): Promise<Check> {
   try {
     const { classifyCapabilities } = await import('../core/ai/capabilities.ts');
@@ -1891,6 +2092,134 @@ export function computeNightlyQualityProbeHealthCheck(
     status: 'ok',
     message: `${events.length} PASS run${events.length === 1 ? '' : 's'} in last 7d. Latest: ${latest.ts}.`,
   };
+}
+
+/**
+ * v0.41.11.0 — conversation_facts_backlog doctor check.
+ *
+ * 3-state status:
+ *   - SKIPPED when cycle.conversation_facts_backfill.enabled=false
+ *     (with paste-ready enable hint). No backlog enumeration; cheap probe.
+ *     This is the Eng-v2 C9 "don't degrade health for opt-out users" gate.
+ *   - OK when enabled=true AND backlog==0 OR no eligible pages exist.
+ *   - WARN when enabled=true AND backlog>10.
+ *
+ * Backlog query uses the page-level TERMINAL audit row check (Eng-v2
+ * C7), source-scoped via explicit predicate (Eng-v2 C2). Partial-
+ * extraction pages stay in backlog because the terminal row isn't
+ * written until ALL segments complete.
+ *
+ * Known approximation (documented in the details field): "complete"
+ * means "terminal row exists" which means "all segments completed in
+ * a prior run." A page with the terminal row from one run + new
+ * messages since shows OK until the next run picks up new messages
+ * and writes a fresh terminal row. The backlog is therefore an UPPER
+ * BOUND on "pages with NO extraction at all", not "pages whose facts
+ * are current."
+ */
+export async function computeConversationFactsBacklogCheck(
+  engine: BrainEngine,
+): Promise<Check> {
+  const name = 'conversation_facts_backlog';
+  try {
+    // Read the same config the cycle phase reads (Eng-v2 A2 single SoT).
+    const enabledRaw = await engine.getConfig(
+      'cycle.conversation_facts_backfill.enabled',
+    );
+    const enabled = enabledRaw != null &&
+      !['false', '0', 'no', 'off', ''].includes(enabledRaw.trim().toLowerCase());
+
+    if (!enabled) {
+      return {
+        name,
+        status: 'ok',
+        message:
+          'disabled (opt-in). Enable with: gbrain config set cycle.conversation_facts_backfill.enabled true',
+      };
+    }
+
+    // Resolve types from same key as cycle phase + CLI default.
+    const typesRaw = await engine.getConfig(
+      'cycle.conversation_facts_backfill.types',
+    );
+    let types = ['conversation', 'meeting', 'slack', 'email'];
+    if (typesRaw) {
+      try {
+        const parsed = JSON.parse(typesRaw);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter(
+            (t): t is string => typeof t === 'string',
+          );
+          if (filtered.length > 0) types = filtered;
+        }
+      } catch {
+        // fall through to default
+      }
+    }
+
+    // Source-scoped NOT EXISTS (Eng-v2 C2 + C7):
+    //   - facts.source matches TERMINAL audit source
+    //   - source_session matches terminal:<slug>
+    //   - source_id matches page's source_id (cross-source safety)
+    const rows = await engine.executeRaw<{ count: string | number }>(
+      `SELECT COUNT(*) AS count FROM pages p
+       WHERE p.type = ANY($1::text[])
+         AND p.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM facts f
+           WHERE f.source = 'cli:extract-conversation-facts:terminal'
+             AND f.source_session = 'cli:extract-conversation-facts:terminal:' || p.slug
+             AND f.source_id = p.source_id
+         )`,
+      [types],
+    );
+
+    const backlog = Number(rows[0]?.count ?? 0);
+
+    if (backlog === 0) {
+      return {
+        name,
+        status: 'ok',
+        message: 'all eligible pages have extraction terminal audit rows',
+        details: {
+          backlog,
+          types,
+          known_approximation:
+            'backlog counts pages with NO extraction terminal row; pages with new messages since prior extraction may show OK until next run',
+        },
+      };
+    }
+
+    if (backlog > 10) {
+      const fixHint =
+        'gbrain extract-conversation-facts --background --max-cost-usd 5';
+      return {
+        name,
+        status: 'warn',
+        message: `${backlog} eligible pages without extraction. Fix: ${fixHint}`,
+        details: {
+          backlog,
+          types,
+          fix_hint: fixHint,
+          known_approximation:
+            'backlog counts pages with NO extraction terminal row; pages with new messages since prior extraction may show OK until next run',
+        },
+      };
+    }
+
+    return {
+      name,
+      status: 'ok',
+      message: `${backlog} eligible page(s) below warn threshold (>10)`,
+      details: { backlog, types },
+    };
+  } catch (err) {
+    return {
+      name,
+      status: 'warn',
+      message: `backlog query failed: ${(err as Error).message}`,
+    };
+  }
 }
 
 export async function checkSyncFreshness(
@@ -2554,6 +2883,42 @@ export async function buildChecks(
     checks.push(check);
   } catch {
     // Best-effort; audit-log read failure shouldn't stop doctor.
+  }
+
+  // 3d.2 v0.41.11.0 — conversation_facts_backlog. 3-state status:
+  // SKIPPED-with-enable-hint when the cycle phase is disabled (opt-out
+  // users don't get noise debt); OK at backlog=0; WARN at backlog>10
+  // with a paste-ready fix command. Emits a Remediation when WARN.
+  if (engine) {
+    try {
+      const check = await computeConversationFactsBacklogCheck(engine);
+      // Wire a remediation step on WARN so `gbrain doctor --remediate`
+      // picks it up. The CLI command honors --max-cost-usd; the
+      // remediation step caps at $5 default (matches doctor's max_usd
+      // default for the remediate flow).
+      if (check.status === 'warn') {
+        try {
+          const { makeRemediationStep } = await import('../core/remediation-step.ts');
+          const remediation = makeRemediationStep({
+            id: 'conversation_facts_backfill',
+            job: 'extract-conversation-facts',
+            params: { sourceId: 'default', maxCostUsd: 5 },
+            severity: 'medium',
+            est_seconds: 600,
+            est_usd_cost: 5,
+            rationale:
+              'Backfill facts for conversation/meeting/slack/email pages so chunker-loses-anchor recall misses get a topical-header-rich facts row to bind to.',
+          });
+          check.remediation = [remediation];
+          check.remediation_status = 'remediable';
+        } catch {
+          // remediation factory unavailable → check still surfaces backlog
+        }
+      }
+      checks.push(check);
+    } catch {
+      // Best-effort; backlog query failure shouldn't stop doctor.
+    }
   }
 
   // 3e. home_dir_in_worktree (v0.35.8.0). Walks up from `gbrainPath()`
@@ -3336,6 +3701,14 @@ export async function buildChecks(
     });
   }
 
+  // 8b. v0.41.2.1 embedding_env_override (D9 #9 — uses Check.details, NOT
+  //     Check.issues). Defense in depth for users who bypass ze-switch
+  //     entirely; surfaces on every hourly doctor run when env disagrees
+  //     with DB config. Mirrored in doctorReportRemote() via the shared
+  //     checkEmbeddingEnvOverride() helper.
+  progress.heartbeat('embedding_env_override');
+  checks.push(await checkEmbeddingEnvOverride(engine));
+
   // 9. Graph health (link + timeline coverage on entity pages).
   // dead_links removed in v0.10.1: ON DELETE CASCADE on link FKs makes it always 0.
   //
@@ -3392,6 +3765,59 @@ export async function buildChecks(
     }
   } catch {
     checks.push({ name: 'graph_coverage', status: 'warn', message: 'Could not check graph coverage' });
+  }
+
+  // 9b. v0.42.0.0 — orphan_ratio check (migration #1 of #1409).
+  //
+  // Surfaces the fraction of linkable pages with no inbound links.
+  // Consumes the same canonical getOrphansData() pure fn as
+  // `gbrain orphans --count` (D1), so the two surfaces cannot disagree.
+  //
+  // Skip when entity count < 100 (vacuous — small brains naturally
+  // show high orphan ratio; not actionable signal).
+  // Warn at >0.5; fail at >0.8. Both states recommend
+  // `gbrain extract links --by-mention` as the fix.
+  progress.heartbeat('orphan_ratio');
+  try {
+    const { getOrphansData } = await import('./orphans.ts');
+    const entityCount = (await engine.executeRaw<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM pages WHERE type IN ('entity', 'person', 'company', 'organization') AND deleted_at IS NULL",
+    ))[0]?.count ?? 0;
+    if (entityCount < 100) {
+      checks.push({
+        name: 'orphan_ratio',
+        status: 'ok',
+        message: `Vacuous: ${entityCount} entity pages (<100). Orphan ratio not meaningful at this scale.`,
+      });
+    } else {
+      const data = await getOrphansData(engine, { includePseudo: false });
+      const ratio = data.total_linkable > 0 ? data.total_orphans / data.total_linkable : 0;
+      const pct = (ratio * 100).toFixed(0);
+      const hint =
+        'Run: gbrain extract links --by-mention   (auto-links entity mentions in body text). ' +
+        'Run gbrain orphans for the list.';
+      if (ratio > 0.8) {
+        checks.push({
+          name: 'orphan_ratio',
+          status: 'fail',
+          message: `Orphan ratio ${pct}% (${data.total_orphans}/${data.total_linkable} linkable pages have no inbound links). ${hint}`,
+        });
+      } else if (ratio > 0.5) {
+        checks.push({
+          name: 'orphan_ratio',
+          status: 'warn',
+          message: `Orphan ratio ${pct}% (${data.total_orphans}/${data.total_linkable} linkable pages have no inbound links). ${hint}`,
+        });
+      } else {
+        checks.push({
+          name: 'orphan_ratio',
+          status: 'ok',
+          message: `Orphan ratio ${pct}% (${data.total_orphans}/${data.total_linkable} linkable pages)`,
+        });
+      }
+    }
+  } catch {
+    checks.push({ name: 'orphan_ratio', status: 'warn', message: 'Could not check orphan ratio' });
   }
 
   // 10. Integrity sample scan (v0.13 knowledge runtime).
@@ -3674,6 +4100,176 @@ export async function buildChecks(
     checks.push({ name: 'markdown_body_completeness', status: 'ok', message: 'Skipped (raw_data unavailable)' });
   } finally {
     mbcHb();
+  }
+
+  // 11b. Content sanity checks (v0.41).
+  //
+  // Three sibling checks all backed by the shared assessor in
+  // src/core/content-sanity.ts so the surface stays aligned with the
+  // ingest gate at importFromContent and the lint rules at lintContent.
+  //
+  // - oversized_pages: indexed-free table scan (~100ms on 100K-page brains)
+  //   counting pages whose body (compiled_truth + timeline, UTF-8 bytes
+  //   via octet_length per Codex r2 #13) exceeds the block threshold.
+  //   Status warn when 1+ rows; never fail (oversize is now a soft state).
+  // - scraper_junk_pages: capped 1000-most-recent default + --content-audit
+  //   opt-in for full scan (D10 mirrors --index-audit precedent). Applies
+  //   the assessor per-page on title + 2KB head-slice + frontmatter.
+  // - content_sanity_audit_recent: reads ~/.gbrain/audit/content-sanity-*.jsonl
+  //   over the last 7 days, aggregates by event type + source. Caveat
+  //   (Codex r1 #14): JSONL is local-only — multi-host operators should
+  //   share GBRAIN_AUDIT_DIR. Message names this so the limitation is
+  //   visible at the doctor surface.
+  const fullContentAudit = args.includes('--content-audit');
+  progress.heartbeat('oversized_pages');
+  try {
+    const sql = db.getConnection();
+    // Read effective bytes_block from the cached effectiveCfg loaded
+    // earlier in this doctor run if available; otherwise default.
+    // (We re-read here per-check to avoid threading config through
+    // every check — bytes_block is read once per doctor run via
+    // loadConfig which caches in module-level config layer.)
+    const { loadConfig: _loadCfg } = await import('../core/config.ts');
+    const _cfg = _loadCfg();
+    const bytesBlock = _cfg?.content_sanity?.bytes_block ?? 500_000;
+    const rows = await sql`
+      SELECT p.slug, p.source_id,
+             octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')) AS bytes
+      FROM pages p
+      WHERE p.deleted_at IS NULL
+        AND (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) > ${bytesBlock}
+      ORDER BY bytes DESC
+      LIMIT 100
+    `;
+    if (rows.length === 0) {
+      checks.push({
+        name: 'oversized_pages',
+        status: 'ok',
+        message: `No pages exceed ${bytesBlock} bytes`,
+      });
+    } else {
+      const oversizeRows = rows as unknown as Array<{ slug: string; source_id: string; bytes: number }>;
+      const top = oversizeRows.slice(0, 3)
+        .map(r => `${r.slug} (${r.bytes}b, src=${r.source_id})`)
+        .join('; ');
+      checks.push({
+        name: 'oversized_pages',
+        status: 'warn',
+        message: `${rows.length} page(s) exceed ${bytesBlock}-byte block threshold. Top: ${top}. New ingests with the same shape get frontmatter.embed_skip set automatically; existing oversized pages can be split or accepted as non-embeddable.`,
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    checks.push({
+      name: 'oversized_pages',
+      status: 'ok',
+      message: `Skipped (${msg})`,
+    });
+  }
+
+  progress.heartbeat('scraper_junk_pages');
+  try {
+    const sql = db.getConnection();
+    const { assessContentSanity } = await import('../core/content-sanity.ts');
+    const { loadOperatorLiterals } = await import('../core/content-sanity-literals.ts');
+    const literals = loadOperatorLiterals();
+    const scanLimit = fullContentAudit ? null : 1000;
+    const rows = scanLimit
+      ? await sql`
+          SELECT p.slug, p.source_id, p.title,
+                 LEFT(p.compiled_truth, 2048) AS body_head,
+                 LEFT(COALESCE(p.timeline, ''), 1024) AS tl_head,
+                 p.frontmatter
+            FROM pages p
+           WHERE p.deleted_at IS NULL
+           ORDER BY p.updated_at DESC
+           LIMIT ${scanLimit}
+        `
+      : await sql`
+          SELECT p.slug, p.source_id, p.title,
+                 LEFT(p.compiled_truth, 2048) AS body_head,
+                 LEFT(COALESCE(p.timeline, ''), 1024) AS tl_head,
+                 p.frontmatter
+            FROM pages p
+           WHERE p.deleted_at IS NULL
+        `;
+    const hits: Array<{ slug: string; matched: string[] }> = [];
+    const scanRows = rows as unknown as Array<{ slug: string; source_id: string; title: string; body_head: string; tl_head: string; frontmatter: Record<string, unknown> | null }>;
+    for (const r of scanRows) {
+      const sanity = assessContentSanity({
+        compiled_truth: r.body_head ?? '',
+        timeline: r.tl_head ?? '',
+        title: r.title ?? '',
+        bytes_warn: Number.MAX_SAFE_INTEGER, // we ONLY care about junk-pattern hits here
+        bytes_block: Number.MAX_SAFE_INTEGER,
+        extra_literals: literals,
+      });
+      if (sanity.shouldHardBlock) {
+        hits.push({
+          slug: r.slug,
+          matched: [...sanity.junk_pattern_matches, ...sanity.literal_substring_matches],
+        });
+      }
+    }
+    if (hits.length === 0) {
+      checks.push({
+        name: 'scraper_junk_pages',
+        status: 'ok',
+        message: scanLimit
+          ? `No junk-pattern hits in ${rows.length} recent page(s) (use --content-audit for full scan)`
+          : `No junk-pattern hits in ${rows.length} page(s) (full audit)`,
+      });
+    } else {
+      const top = hits.slice(0, 3).map(h => `${h.slug} [${h.matched.join(',')}]`).join('; ');
+      checks.push({
+        name: 'scraper_junk_pages',
+        status: 'warn',
+        message: `${hits.length} page(s) match junk patterns. Top: ${top}. ${scanLimit ? '(scanned 1000 most-recent; rerun with --content-audit for full scan)' : '(full audit)'} New ingests with these shapes are now hard-blocked; existing inventory should be cleaned at source.`,
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    checks.push({
+      name: 'scraper_junk_pages',
+      status: 'ok',
+      message: `Skipped (${msg})`,
+    });
+  }
+
+  progress.heartbeat('content_sanity_audit_recent');
+  try {
+    const { readRecentContentSanityEvents, summarizeContentSanityEvents } =
+      await import('../core/audit/content-sanity-audit.ts');
+    const events = readRecentContentSanityEvents(7);
+    if (events.length === 0) {
+      checks.push({
+        name: 'content_sanity_audit_recent',
+        status: 'ok',
+        message: 'No content-sanity events in last 7 days (audit JSONL is local to this host; share GBRAIN_AUDIT_DIR for multi-host visibility)',
+      });
+    } else {
+      const summary = summarizeContentSanityEvents(events);
+      const topPatterns = summary.top_patterns.slice(0, 3).map(p => `${p.name}=${p.count}`).join(', ');
+      const topSources = Object.entries(summary.by_source)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([s, n]) => `${s}=${n}`)
+        .join(', ');
+      const status: 'ok' | 'warn' | 'fail' =
+        events.length >= 100 ? 'fail' : events.length >= 10 ? 'warn' : 'ok';
+      checks.push({
+        name: 'content_sanity_audit_recent',
+        status,
+        message: `${events.length} events (hard=${summary.by_type.hard_block} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    checks.push({
+      name: 'content_sanity_audit_recent',
+      status: 'ok',
+      message: `Skipped (${msg})`,
+    });
   }
 
   // 11a. Frontmatter integrity (v0.22.4, hardened in v0.38.2.0).
@@ -4497,6 +5093,9 @@ export async function buildChecks(
     // 5M — autopilot_lock_scope (PID-safe hint per codex CF11)
     progress.heartbeat('autopilot_lock_scope');
     checks.push(checkAutopilotLockScope());
+    // v0.41.6.0 D3 — stale_locks (gbrain_cycle_locks rows with ttl_expires_at < NOW())
+    progress.heartbeat('stale_locks');
+    checks.push(await checkStaleLocks(engine));
     // v0.38 — cycle_phase_scope (informational; no DB cost)
     progress.heartbeat('cycle_phase_scope');
     checks.push(checkCyclePhaseScope());
@@ -5291,31 +5890,27 @@ async function loadRecommendationContext(engine: BrainEngine) {
     embeddingModel = dbModel ?? undefined;
     embeddingDimensions = dbDims ? Number(dbDims) : undefined;
   }
-  // Provider-aware key check. The active embedding provider determines
-  // which key matters. Pre-fix this was OpenAI-only, so a ZE brain with
-  // OPENAI_API_KEY set looked "healthy" even though no key reached ZE.
+  // v0.40.x: recipe-aware provider check, shared with autopilot.ts via
+  // embeddingProviderConfigured(). Local providers (ollama, llama-server —
+  // empty auth_env.required) need no hosted key; hosted providers check
+  // their OWN required key (so a Voyage brain is judged by VOYAGE_API_KEY,
+  // not by whether an OpenAI/ZE key happens to exist — the pre-fix wart).
+  // fileCfg loads synchronously, so the resolveKey closure is sync.
   const { loadConfigFileOnly } = await import('../core/config.ts');
   const fileCfg = loadConfigFileOnly();
-  let hasEmbeddingApiKey = false;
-  if (embeddingModel?.startsWith('openai:')) {
-    hasEmbeddingApiKey = !!(process.env.OPENAI_API_KEY || fileCfg?.openai_api_key);
-  } else if (embeddingModel?.startsWith('zeroentropyai:')) {
-    hasEmbeddingApiKey = !!(process.env.ZEROENTROPY_API_KEY || fileCfg?.zeroentropy_api_key);
-  } else {
-    // Voyage / generic openai-compatible / unknown provider — fall back
-    // to "any key present" as the legacy hint.
-    hasEmbeddingApiKey = !!(
-      process.env.OPENAI_API_KEY ||
-      process.env.ZEROENTROPY_API_KEY ||
-      fileCfg?.openai_api_key ||
-      fileCfg?.zeroentropy_api_key
-    );
-  }
+  const { embeddingProviderConfigured, HOSTED_EMBED_KEY_CONFIG } = await import(
+    '../core/brain-score-recommendations.ts'
+  );
+  const embeddingConfigured = embeddingProviderConfigured(embeddingModel, (envVar) => {
+    const cfgField = HOSTED_EMBED_KEY_CONFIG[envVar];
+    const fromCfg = cfgField ? (fileCfg as Record<string, unknown> | null)?.[cfgField] : undefined;
+    return !!(process.env[envVar] || fromCfg);
+  });
   return {
     repoPath: repoPath ?? undefined,
     embeddingModel,
     embeddingDimensions,
-    hasEmbeddingApiKey,
+    embeddingProviderConfigured: embeddingConfigured,
     hasChatApiKey: !!(process.env.ANTHROPIC_API_KEY || fileCfg?.anthropic_api_key),
   };
 }

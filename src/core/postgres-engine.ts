@@ -146,6 +146,11 @@ export class PostgresEngine implements BrainEngine {
         idle_timeout: 20,
         connect_timeout: 10,
         types: { bigint: postgres.BigInt },
+        // Silence postgres NOTICE-level messages by default. See db.ts for
+        // rationale (stdout-parsing callers like jobs-submit --json break when
+        // idempotent CREATE migrations flood stdout). Opt back in with
+        // GBRAIN_PG_NOTICES=1.
+        onnotice: process.env.GBRAIN_PG_NOTICES === '1' ? undefined : () => {},
       };
       if (Object.keys(timeouts).length > 0) {
         opts.connection = timeouts;
@@ -262,7 +267,7 @@ export class PostgresEngine implements BrainEngine {
       // Run any pending migrations automatically
       const { applied } = await runMigrations(this);
       if (applied > 0) {
-        console.log(`  ${applied} migration(s) applied`);
+        process.stderr.write(`  ${applied} migration(s) applied\n`);
       }
 
       // Post-migration schema verification: catches columns that migrations
@@ -270,7 +275,7 @@ export class PostgresEngine implements BrainEngine {
       // Self-heals missing columns via ALTER TABLE ADD COLUMN IF NOT EXISTS.
       const verify = await verifySchema(this);
       if (verify.healed.length > 0) {
-        console.log(`  Schema verify: self-healed ${verify.healed.length} missing column(s)`);
+        process.stderr.write(`  Schema verify: self-healed ${verify.healed.length} missing column(s)\n`);
       }
 
       // v0.30.1 (Fix 5): sweep zombie HNSW indexes (indisvalid=false) from
@@ -279,7 +284,7 @@ export class PostgresEngine implements BrainEngine {
       try {
         const result = await dropZombieIndexes(this);
         if (result.dropped.length > 0) {
-          console.log(`  HNSW sweep: dropped ${result.dropped.length} zombie index(es)`);
+          process.stderr.write(`  HNSW sweep: dropped ${result.dropped.length} zombie index(es)\n`);
         }
       } catch { /* best-effort */ }
     } finally {
@@ -529,7 +534,7 @@ export class PostgresEngine implements BrainEngine {
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration) return;
 
-    console.log('  Pre-v0.21 brain detected, applying forward-reference bootstrap');
+    process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
     if (needsPagesBootstrap) {
       // Mirror schema-embedded.ts's `sources` shape so the subsequent
@@ -802,6 +807,29 @@ export class PostgresEngine implements BrainEngine {
     `;
     if (rows.length === 0) return null;
     return rowToPage(rows[0]);
+  }
+
+  /**
+   * v0.41.13 (#1309) — identity-based dedup pre-check.
+   * See `BrainEngine.findDuplicatePage` for the contract.
+   */
+  async findDuplicatePage(
+    sourceId: string,
+    opts: { hash: string; frontmatterId?: string | null },
+  ): Promise<{ slug: string; id: number } | null> {
+    const sql = this.sql;
+    const fmId = opts.frontmatterId ?? null;
+    const rows = await sql`
+      SELECT id, slug FROM pages
+      WHERE source_id = ${sourceId}
+        AND deleted_at IS NULL
+        AND (content_hash = ${opts.hash} OR (frontmatter->>'id' = ${fmId} AND ${fmId}::text IS NOT NULL))
+      ORDER BY id
+      LIMIT 1
+    `;
+    if (rows.length === 0) return null;
+    const r = rows[0] as { id: number | string; slug: string };
+    return { slug: r.slug, id: Number(r.id) };
   }
 
   async putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page> {
@@ -1270,18 +1298,31 @@ export class PostgresEngine implements BrainEngine {
     }));
   }
 
-  async resolveSlugs(partial: string): Promise<string[]> {
+  async resolveSlugs(partial: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<string[]> {
     const sql = this.sql;
 
+    // v0.41.13 #1436: source scope via postgres.js tagged-template
+    // fragments. When neither opt is set the resolver stays unscoped
+    // for back-compat with internal callers. The `deleted_at IS NULL`
+    // filter excludes soft-deleted rows (v0.26.5) from fuzzy candidates
+    // — they're not legitimate match targets for a remote `get_page`.
+    const sources = opts?.sourceIds ?? null;
+    const scalar = opts?.sourceId ?? null;
+    const scopeFragment = sources
+      ? sql` AND source_id = ANY(${sources}::text[])`
+      : scalar
+        ? sql` AND source_id = ${scalar}`
+        : sql``;
+
     // Try exact match first
-    const exact = await sql`SELECT slug FROM pages WHERE slug = ${partial}`;
+    const exact = await sql`SELECT slug FROM pages WHERE slug = ${partial} AND deleted_at IS NULL${scopeFragment}`;
     if (exact.length > 0) return [exact[0].slug];
 
     // Fuzzy match via pg_trgm
     const fuzzy = await sql`
       SELECT slug, similarity(title, ${partial}) AS sim
       FROM pages
-      WHERE title % ${partial} OR slug ILIKE ${'%' + partial + '%'}
+      WHERE deleted_at IS NULL AND (title % ${partial} OR slug ILIKE ${'%' + partial + '%'})${scopeFragment}
       ORDER BY sim DESC
       LIMIT 5
     `;
@@ -1717,7 +1758,9 @@ export class PostgresEngine implements BrainEngine {
         raw_score * ${sourceFactorCaseOnSlug} AS score,
         false AS stale
       FROM hnsw_candidates
-      ORDER BY score DESC
+      -- v0.41.13: stable tiebreaker for tied scores. See pglite-engine for
+      -- rationale (basis-vector test fixtures, planner-dependent ordering).
+      ORDER BY score DESC, page_id ASC, chunk_id ASC
       LIMIT ${limitParam}
       OFFSET ${offsetParam}
     `;
@@ -1899,15 +1942,22 @@ export class PostgresEngine implements BrainEngine {
 
   async countStaleChunks(opts?: { sourceId?: string }): Promise<number> {
     const sql = this.sql;
-    // Fast path: no source filter → bare count query, no join.
-    // Slow path: source-scoped count → join pages.
-    // D7: closes the bug where `gbrain embed --stale --source X` silently
-    // dropped X and counted across every source.
+    // v0.41 (D4+D8+Codex r2 #11): the embed-skip filter requires JOIN
+    // pages so we always join — the pre-v0.41 "fast path" without join
+    // is gone. JSONB `?` existence check is cheap on the small set of
+    // skipped pages; full-scan benefits from the partial index on
+    // embedding IS NULL regardless.
+    //
+    // D7: source_id scoping. NULL/undefined = scan all sources;
+    // a value scopes to that source so `gbrain embed --stale --source X`
+    // does what it says.
     if (opts?.sourceId === undefined) {
       const [row] = await sql`
         SELECT count(*)::int AS count
-        FROM content_chunks
-        WHERE embedding IS NULL
+        FROM content_chunks cc
+        JOIN pages p ON p.id = cc.page_id
+        WHERE cc.embedding IS NULL
+          AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
       `;
       return Number((row as { count?: number } | undefined)?.count ?? 0);
     }
@@ -1917,6 +1967,7 @@ export class PostgresEngine implements BrainEngine {
       JOIN pages p ON p.id = cc.page_id
       WHERE cc.embedding IS NULL
         AND p.source_id = ${opts.sourceId}
+        AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
     `;
     return Number((row as { count?: number } | undefined)?.count ?? 0);
   }
@@ -1938,6 +1989,12 @@ export class PostgresEngine implements BrainEngine {
     // D7: optional source_id filter. NULL/undefined = scan all sources
     // (pre-existing behavior); a value scopes to that source so
     // `gbrain embed --stale --source X` actually does what it says.
+    //
+    // v0.41 (D4+D8): NOT (frontmatter ? 'embed_skip') filter applied via
+    // the always-JOINed pages row. Soft-blocked pages won't surface in
+    // the stale list; their chunks were deleted at ingest time anyway
+    // (D9 transition invariant), but the filter is defense-in-depth for
+    // pre-fix inventory that might still have orphan chunks.
     if (opts?.sourceId === undefined) {
       const rows = await sql`
         SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
@@ -1945,6 +2002,7 @@ export class PostgresEngine implements BrainEngine {
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         WHERE cc.embedding IS NULL
+          AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
         ORDER BY cc.page_id, cc.chunk_index
         LIMIT ${limit}
@@ -1958,6 +2016,7 @@ export class PostgresEngine implements BrainEngine {
       JOIN pages p ON p.id = cc.page_id
       WHERE cc.embedding IS NULL
         AND p.source_id = ${opts.sourceId}
+        AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
       ORDER BY cc.page_id, cc.chunk_index
       LIMIT ${limit}
@@ -2434,11 +2493,20 @@ export class PostgresEngine implements BrainEngine {
     if (slugs.length === 0) return result;
     for (const s of slugs) result.set(s, 0);
 
+    // v0.42.0.0 D12: filter mentions OUT of backlink-count for search
+    // ranking. `link_source='mentions'` rows are auto-linked body-text
+    // mentions from `gbrain extract links --by-mention`; they're
+    // graph-completeness signal, NOT human-intent signal. Counting them
+    // toward backlinks would shift search ranking globally on first
+    // --by-mention run, boosting popular-mention pages over intentional-
+    // backlink pages. `IS DISTINCT FROM` is NULL-safe so legacy rows with
+    // NULL link_source still count (NULL != 'mentions' → row included).
     const sql = this.sql;
     const rows = await sql`
       SELECT p.slug as slug, COUNT(l.id)::int as cnt
       FROM pages p
       LEFT JOIN links l ON l.to_page_id = p.id
+        AND l.link_source IS DISTINCT FROM 'mentions'
       WHERE p.slug = ANY(${slugs}::text[])
       GROUP BY p.slug
     `;
