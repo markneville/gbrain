@@ -54,7 +54,13 @@ CHECKS=(
   "check:fuzz-purity"
   "check:operations-filter-bypass"
   "check:gateway-routed"
+  "check:worker-pool-atomicity"
+  "check:fixture-privacy"
+  "check:conversation-parser"
   "check:resolver"
+  "check:source-scope-onboard"
+  "check:no-double-retry"
+  "check:batch-audit-site"
   "typecheck"
 )
 
