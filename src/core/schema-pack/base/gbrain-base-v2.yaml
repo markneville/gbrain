@@ -251,7 +251,6 @@ page_types:
     primitive: temporal
     path_prefixes:
       - emails/
-      - email/
     aliases:
       - email-thread
     extractable: true
