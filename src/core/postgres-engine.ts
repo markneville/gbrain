@@ -1189,7 +1189,20 @@ export class PostgresEngine implements BrainEngine {
     // template tag is the canonical safe path — same pattern as
     // putPage + submitJob elsewhere in this file. Empirically verified
     // produces jsonb_typeof = 'object'.
-    const sql = this.sql;
+    let sql: ReturnType<typeof postgres>;
+    try {
+      sql = this.sql;
+    } catch (e) {
+      // v0.41.26 Spark merge hardening: several long cycle phases can tear
+      // down the module-level singleton before the final per-source freshness
+      // writeback runs. Reconnect once from the saved config so
+      // `gbrain dream --source <id>` can actually persist last_full_cycle_at
+      // instead of leaving doctor cycle_freshness permanently stale.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/No database connection/i.test(msg) || !this._savedConfig) throw e;
+      await this.connect(this._savedConfig);
+      sql = this.sql;
+    }
     const result = await sql`
       UPDATE sources
          SET config = COALESCE(config, '{}'::jsonb) || ${sql.json(patch as Parameters<typeof sql.json>[0])}

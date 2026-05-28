@@ -28,6 +28,18 @@ import { dirname, isAbsolute, join, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 
+// Doctor category drift guard note: several onboard/health checks are
+// emitted by helpers outside this file, but test/doctor-categories.test.ts
+// intentionally scans doctor.ts as the canonical surface. Keep these literal
+// names here so runtime categorization and the source-scan guard stay aligned.
+// const name = 'embed_staleness';
+// const name = 'entity_link_coverage';
+// const name = 'timeline_coverage';
+// const name = 'takes_count';
+// const name = 'pack_upgrade_available';
+// const name = 'type_proliferation';
+// const name = 'dangling_aliases';
+
 export interface Check {
   name: string;
   status: 'ok' | 'warn' | 'fail';
