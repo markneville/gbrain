@@ -51,6 +51,8 @@ export interface BasePhaseOpts {
   reporter?: ProgressReporter;
   /** Dry-run mode propagated from cycle opts. Subclasses honor this in process(). */
   dryRun?: boolean;
+  /** Optional abort signal propagated from the cycle orchestrator. */
+  signal?: AbortSignal;
   /** Optional explicit budget override in USD. Otherwise base reads config. */
   budgetUsd?: number;
   /** Optional injected BudgetMeter (tests). When set, replaces the default constructed one. */

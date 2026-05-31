@@ -4612,9 +4612,18 @@ export class PostgresEngine implements BrainEngine {
 
   // Config
   async getConfig(key: string): Promise<string | null> {
-    const sql = this.sql;
-    const rows = await sql`SELECT value FROM config WHERE key = ${key}`;
-    return rows.length > 0 ? (rows[0].value as string) : null;
+    try {
+      let sql = this.sql;
+      const rows = await sql`SELECT value FROM config WHERE key = ${key}`;
+      return rows.length > 0 ? (rows[0].value as string) : null;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/No database connection/i.test(msg) || !this._savedConfig) throw e;
+      await this.connect(this._savedConfig);
+      const sql = this.sql;
+      const rows = await sql`SELECT value FROM config WHERE key = ${key}`;
+      return rows.length > 0 ? (rows[0].value as string) : null;
+    }
   }
 
   async setConfig(key: string, value: string): Promise<void> {

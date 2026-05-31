@@ -384,4 +384,26 @@ New prose appended here.`;
     expect(typeof runIdA).toBe('string');
     expect((runIdA as string).startsWith('propose-')).toBe(true);
   });
+
+  test('dryRun previews eligible misses without calling extractor or writing proposals', async () => {
+    const pages = [buildPage({ slug: 'wiki/dry-run', body: 'new prose worth reviewing' })];
+    const { engine, captured } = buildMockEngine({ pages });
+    let extractorCalled = false;
+    const extractor: ProposeTakesExtractor = async () => {
+      extractorCalled = true;
+      return [{ claim_text: 'should not be inserted', kind: 'take', holder: 'brain', weight: 0.5 }];
+    };
+
+    const result = await runPhaseProposeTakes(buildCtx(engine), { extractor, dryRun: true });
+
+    expect(result.status).toBe('ok');
+    expect(extractorCalled).toBe(false);
+    const details = result.details as Record<string, unknown>;
+    expect(details.pages_scanned).toBe(1);
+    expect(details.cache_misses).toBe(1);
+    expect(details.proposals_inserted).toBe(0);
+    expect(details.dry_run).toBe(true);
+    expect(details.would_extract).toBe(1);
+    expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
+  });
 });

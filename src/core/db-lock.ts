@@ -93,12 +93,38 @@ export async function tryAcquireDbLock(
       RETURNING id
     `;
     if (rows.length === 0) return null;
-    const deregister = registerCleanup(`db-lock:${lockId}`, async () => {
-      await sql`
-        DELETE FROM gbrain_cycle_locks
-        WHERE id = ${lockId} AND holder_pid = ${pid}
-      `;
-    });
+    const releaseSql = async () => {
+      const runDelete = async () => {
+        const exec = (engine as unknown as {
+          executeRaw?: <T = Record<string, unknown>>(query: string, params?: unknown[]) => Promise<T[]>;
+        }).executeRaw;
+        if (typeof exec === 'function') {
+          await exec.call(
+            engine,
+            `DELETE FROM gbrain_cycle_locks
+              WHERE id = $1 AND holder_pid = $2
+             RETURNING id`,
+            [lockId, pid],
+          );
+          return;
+        }
+        await sql`
+          DELETE FROM gbrain_cycle_locks
+          WHERE id = ${lockId} AND holder_pid = ${pid}
+        `;
+      };
+
+      try {
+        await runDelete();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const reconnect = (engine as unknown as { reconnect?: () => Promise<void> }).reconnect;
+        if (!/No database connection/i.test(msg) || typeof reconnect !== 'function') throw e;
+        await reconnect.call(engine);
+        await runDelete();
+      }
+    };
+    const deregister = registerCleanup(`db-lock:${lockId}`, releaseSql);
     return {
       id: lockId,
       refresh: async () => {
@@ -114,10 +140,7 @@ export async function tryAcquireDbLock(
       },
       release: async () => {
         deregister();
-        await sql`
-          DELETE FROM gbrain_cycle_locks
-          WHERE id = ${lockId} AND holder_pid = ${pid}
-        `;
+        await releaseSql();
       },
     };
   }

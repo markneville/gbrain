@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   LockUnavailableError,
   buildTenantLockId,
+  tryAcquireDbLock,
   type WithRefreshingLockOpts,
 } from '../src/core/db-lock.ts';
 
@@ -65,5 +66,67 @@ describe('WithRefreshingLockOpts shape', () => {
     };
     expect(opts.ttlMinutes).toBe(60);
     expect(opts.heartbeatTimeoutMs).toBe(5000);
+  });
+});
+
+describe('tryAcquireDbLock release reconnect', () => {
+  test('postgres release retries with a fresh sql handle after disconnect', async () => {
+    let released = false;
+    let reconnects = 0;
+    let releaseAttempts = 0;
+
+    const staleSql = async (strings: TemplateStringsArray) => {
+      const query = strings.join('?');
+      if (query.includes('INSERT INTO gbrain_cycle_locks')) {
+        return [{ id: 'gbrain-cycle:default' }];
+      }
+      if (query.includes('DELETE FROM gbrain_cycle_locks')) {
+        releaseAttempts += 1;
+        throw new Error('No database connection: connect() has not been called');
+      }
+      return [];
+    };
+
+    const freshSql = async (strings: TemplateStringsArray) => {
+      const query = strings.join('?');
+      if (query.includes('DELETE FROM gbrain_cycle_locks')) {
+        releaseAttempts += 1;
+        released = true;
+        return [];
+      }
+      return [];
+    };
+
+    const fakeEngine: any = {
+      kind: 'postgres' as const,
+      sql: staleSql,
+      async executeRaw(query: string) {
+        if (query.includes('DELETE FROM gbrain_cycle_locks')) {
+          releaseAttempts += 1;
+          throw new Error('No database connection: connect() has not been called');
+        }
+        return [];
+      },
+      async reconnect() {
+        reconnects += 1;
+        (fakeEngine as any).sql = freshSql;
+        (fakeEngine as any).executeRaw = async (query: string) => {
+          if (query.includes('DELETE FROM gbrain_cycle_locks')) {
+            releaseAttempts += 1;
+            released = true;
+          }
+          return [];
+        };
+      },
+    };
+
+    const handle = await tryAcquireDbLock(fakeEngine, 'gbrain-cycle:default', 30);
+    expect(handle).not.toBeNull();
+
+    await handle!.release();
+
+    expect(reconnects).toBe(1);
+    expect(releaseAttempts).toBe(2);
+    expect(released).toBe(true);
   });
 });

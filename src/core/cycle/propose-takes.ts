@@ -153,6 +153,9 @@ export interface ProposeTakesResult {
   cache_misses: number;
   proposals_inserted: number;
   budget_exhausted: boolean;
+  walltime_exhausted?: boolean;
+  dry_run?: boolean;
+  would_extract?: number;
   warnings: string[];
 }
 
@@ -163,6 +166,16 @@ export interface ProposeTakesResult {
  */
 export function contentHash(pageBody: string): string {
   return createHash('sha256').update(pageBody).digest('hex');
+}
+
+function parsePositiveInt(raw: unknown, fallback: number): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function parsePositiveFloat(raw: unknown, fallback: number): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number.parseFloat(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 /**
@@ -305,7 +318,11 @@ class ProposeTakesPhase extends BaseCyclePhase {
   ): Promise<{ summary: string; details: Record<string, unknown>; status?: PhaseStatus }> {
     const extractor = opts.extractor ?? defaultExtractor;
     const promptVersion = opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION;
-    const pageLimit = opts.pageLimit ?? 100;
+    const configuredPageLimit = ((_ctx.config as unknown) as Record<string, unknown>)['cycle.propose_takes.page_limit'];
+    const pageLimit = opts.pageLimit ?? parsePositiveInt(configuredPageLimit, 100);
+    const configuredWalltimeMin = ((_ctx.config as unknown) as Record<string, unknown>)['cycle.propose_takes.max_walltime_min'];
+    const maxWalltimeMs = parsePositiveFloat(configuredWalltimeMin, 5) * 60_000;
+    const startedAt = Date.now();
     const skipPagesWithFence = opts.skipPagesWithFence ?? false;
     const proposalRunId = `propose-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${randomUUID().slice(0, 8)}`;
 
@@ -356,6 +373,25 @@ class ProposeTakesPhase extends BaseCyclePhase {
         continue;
       }
       result.cache_misses += 1;
+
+      if (opts.dryRun) {
+        result.dry_run = true;
+        result.would_extract = (result.would_extract ?? 0) + 1;
+        continue;
+      }
+
+      if (opts.signal?.aborted) {
+        result.warnings.push('aborted before extractor call');
+        break;
+      }
+
+      if (Date.now() - startedAt > maxWalltimeMs) {
+        result.walltime_exhausted = true;
+        result.warnings.push(
+          `walltime exhausted at page ${result.pages_scanned}/${pages.length} (cap ${(maxWalltimeMs / 60_000).toFixed(2)} min)`,
+        );
+        break;
+      }
 
       // Budget pre-check before the LLM call. Estimate: ~1500 input tokens + 500 output.
       const budget = this.checkBudget({
@@ -420,7 +456,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
     // v0.42 Wave B3: receipt + rollup for propose_takes. Source-scoped
     // via the read scope. Receipt only when proposals actually written.
     const sourceIdForReceipt = scope.sourceId ?? 'default';
-    if (result.proposals_inserted > 0) {
+    if (result.proposals_inserted > 0 && !opts.dryRun) {
       try {
         await writeReceipt(engine, {
           kind: 'takes.proposed',
@@ -448,7 +484,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
     return {
       summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_inserted} new proposals (run ${proposalRunId})`,
       details: { ...result, proposal_run_id: proposalRunId, prompt_version: promptVersion },
-      status: result.budget_exhausted ? 'warn' : 'ok',
+      status: result.budget_exhausted || result.walltime_exhausted ? 'warn' : 'ok',
     };
   }
 }
