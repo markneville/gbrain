@@ -35,7 +35,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'reinit-pglite', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'extract-conversation-facts', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'calibration', 'salience', 'anomalies', 'transcripts', 'models', 'remote', 'recall', 'forget', 'edges-backfill', 'cache', 'ze-switch', 'founder', 'brainstorm', 'lsd', 'schema', 'capture', 'onboard', 'conversation-parser', 'status']);
+const CLI_ONLY = new Set(['init', 'reinit-pglite', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'extract-conversation-facts', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'calibration', 'salience', 'anomalies', 'transcripts', 'models', 'remote', 'recall', 'forget', 'edges-backfill', 'cache', 'ze-switch', 'founder', 'brainstorm', 'lsd', 'schema', 'capture', 'onboard', 'conversation-parser', 'status', 'skillopt']);
 // CLI-only commands whose handlers print their own --help text. These are
 // excluded from the generic short-circuit so detailed per-command and
 // per-subcommand usage stays reachable.
@@ -48,6 +48,9 @@ const CLI_ONLY_SELF_HELP = new Set([
   'models', 'takes',
   'cache',
   'brainstorm', 'lsd',
+  // v0.41.20.0 skillopt's detailed HELP constant lives in
+  // src/core/skillopt/help.ts; --help routes there via the dispatcher.
+  'skillopt',
   // v0.39.3.0 WARN-5: capture's detailed HELP constant
   // (src/commands/capture.ts:90+) was unreachable because the dispatcher's
   // generic short-circuit (printCliOnlyHelp at :204-208) fired before
@@ -105,6 +108,38 @@ async function main() {
   // DX alias: `ask` is a natural-language alias for `query`
   if (command === 'ask') {
     command = 'query';
+  }
+
+  // T5 — `gbrain search modes|stats|tune` is the read-only config dashboard,
+  // NOT a free-text search for the literal word "modes". Free-text
+  // `gbrain search "<query>"` falls through to the cheap-hybrid `search` op
+  // below (T4). Preserves the v0.41.6.0 read-only connect+dispatch timeout.
+  if (command === 'search' && ['modes', 'stats', 'tune', 'diagnose'].includes(subArgs[0] ?? '')) {
+    const { withTimeout, OperationTimeoutError } = await import('./core/timeout.ts');
+    const isDiagnose = subArgs[0] === 'diagnose';
+    const label = 'gbrain search';
+    // diagnose runs real retrieval (keyword + vector + hybrid) so it gets a
+    // longer deadline than the read-only dashboard.
+    const timeoutMs = isDiagnose ? 60_000 : 10_000;
+    let engine: BrainEngine;
+    try {
+      engine = await withTimeout(connectEngine(), timeoutMs, `${label}: connect`);
+    } catch (e) {
+      if (e instanceof OperationTimeoutError) { console.error(`${e.label} timed out.`); process.exit(124); }
+      throw e;
+    }
+    try {
+      if (isDiagnose) {
+        const { runSearchDiagnose } = await import('./commands/search-diagnose.ts');
+        await withTimeout(runSearchDiagnose(engine, subArgs), timeoutMs, label);
+      } else {
+        const { runSearch } = await import('./commands/search.ts');
+        await withTimeout(runSearch(engine, subArgs), timeoutMs, label);
+      }
+    } finally {
+      await engine.disconnect();
+    }
+    return;
   }
 
   // Per-command --help
@@ -1446,6 +1481,13 @@ async function handleCliOnly(command: string, args: string[]) {
           }
           break;
         }
+        if (args.includes('--aliases')) {
+          // T8 — backfill the free-text alias layer (page_aliases) for existing
+          // pages whose frontmatter `aliases:` predate the import-time projection.
+          const { runReindexAliases } = await import('./commands/reindex-aliases.ts');
+          await runReindexAliases(engine, args);
+          break;
+        }
         const { runReindex } = await import('./commands/reindex.ts');
         await runReindex(engine, args);
         break;
@@ -1518,6 +1560,16 @@ async function handleCliOnly(command: string, args: string[]) {
         // LSD_PROFILE config. Local-only by design (cost + weirdness gate).
         const { runLsdCommand } = await import('./commands/lsd.ts');
         await runLsdCommand(engine, args);
+        break;
+      }
+      case 'skillopt': {
+        // v0.41.20.0 — Self-evolving skill optimization (SkillOpt-paper-grounded).
+        // Mutating CLI: validation-gated (D12), budget-capped (D3), per-skill
+        // DB-locked (D14), bundled-skill-gated (D16), bootstrap-sentinel-reviewed
+        // (D15). See: src/core/skillopt/ + plan at
+        // ~/.claude/plans/system-instruction-you-are-working-drifting-falcon.md.
+        const { runSkillOptCommand } = await import('./commands/skillopt.ts');
+        await runSkillOptCommand(engine, args);
         break;
       }
       case 'calibration': {

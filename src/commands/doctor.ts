@@ -28,6 +28,9 @@ import { dirname, isAbsolute, join, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { isSourceUnchangedSinceSync } from '../core/git-head.ts';
+// v0.41.32.0: remote staleness reads the stored newest_content_at column via
+// this pure comparator (no git subprocess on the HTTP MCP doctor path).
+import { lagFromContentMs } from '../core/source-health.ts';
 import { CHUNKER_VERSION } from '../core/chunkers/code.ts';
 
 // Doctor category drift guard note: several onboard/health checks are
@@ -2729,8 +2732,11 @@ export async function checkSyncFreshness(
       last_sync_at: Date | null;
       last_commit: string | null;
       chunker_version: string | null;
+      newest_content_at: Date | null;
     }>(
-      `SELECT id, name, local_path, last_sync_at, last_commit, chunker_version FROM sources WHERE local_path IS NOT NULL`,
+      // v0.41.32.0: newest_content_at feeds the REMOTE (non-localOnly) lag so
+      // doctorReportRemote never shells out to git on a DB-supplied local_path.
+      `SELECT id, name, local_path, last_sync_at, last_commit, chunker_version, newest_content_at FROM sources WHERE local_path IS NOT NULL`,
     );
 
     if (sources.length === 0) {
@@ -2810,8 +2816,14 @@ export async function checkSyncFreshness(
       // v0.41.27.0: git short-circuit (D4 + D7 combined). Only fires when:
       //   1. caller opted in via localOnly=true (trust boundary)
       //   2. HEAD === last_commit (no new commits to sync)
-      //   3. working tree is clean (no uncommitted edits sync would re-walk)
-      //   4. chunker_version matches CURRENT (no post-upgrade re-chunk pending)
+      //   3. working tree has no TRACKED changes — untracked files ignored
+      //      (v0.41.32.0: `'ignore-untracked'`. Sync's incremental path keys off
+      //      the commit diff and never imports untracked files, so a quiet repo
+      //      with stray untracked dirs is genuinely caught up. The pre-v0.41.30
+      //      `true` mode counted those as dirty and produced the false-SEVERE
+      //      alarm this wave fixes.)
+      //   4. chunker_version matches CURRENT (no post-upgrade re-chunk pending —
+      //      still ANDed, so a re-chunk need is never masked)
       // All four must hold; otherwise fall through to the time-based check.
       // The chunker version match is computed here (not in the helper)
       // because it depends on engine state, not git state.
@@ -2819,7 +2831,7 @@ export async function checkSyncFreshness(
         const gitUnchanged = isSourceUnchangedSinceSync(
           source.local_path,
           source.last_commit,
-          { requireCleanWorkingTree: true },
+          { requireCleanWorkingTree: 'ignore-untracked' },
         );
         const chunkerMatch = source.chunker_version === currentChunkerVersion;
         if (gitUnchanged && chunkerMatch) {
@@ -2828,14 +2840,35 @@ export async function checkSyncFreshness(
         }
       }
 
-      const ageHours = Math.floor(ageMs / (1000 * 60 * 60));
+      // v0.41.32.0: REMOTE path (doctorReportRemote, !localOnly) computes lag
+      // from the stored newest_content_at column — NO git subprocess on a
+      // DB-supplied local_path (preserves the v0.41.27.0 trust boundary). A
+      // quiet repo whose newest commit predates its last sync reports 0; NULL
+      // column → wall-clock fallback. LOCAL fall-through keeps wall-clock: the
+      // short-circuit already failed, so the source genuinely has work and
+      // "hours since last sync" is the right staleness measure. The `ageMs < 0`
+      // skew check above still runs on raw wall-clock for both paths (A1).
+      let thresholdAgeMs = ageMs;
+      if (!localOnly) {
+        const contentMs = source.newest_content_at
+          ? new Date(source.newest_content_at).getTime()
+          : null;
+        const lagSec = lagFromContentMs(
+          contentMs !== null && Number.isFinite(contentMs) ? contentMs : null,
+          lastSync,
+          now,
+        );
+        thresholdAgeMs = lagSec === null ? ageMs : lagSec * 1000;
+      }
+
+      const ageHours = Math.floor(thresholdAgeMs / (1000 * 60 * 60));
       const ageDays = Math.floor(ageHours / 24);
 
-      if (ageMs > failMs) {
+      if (thresholdAgeMs > failMs) {
         issues.push(`Source ${display} last synced ${ageDays}d ago — brain search is stale!`);
         hasFailures = true;
         stale_count++;
-      } else if (ageMs > warnMs) {
+      } else if (thresholdAgeMs > warnMs) {
         issues.push(`Source ${display} last synced ${ageHours}h ago`);
         hasWarnings = true;
         stale_count++;
@@ -3098,6 +3131,19 @@ export async function buildChecks(
   // covers `whoknows_health` (the one DB-dependent skill check) where it's
   // invoked later in the function.
   const scope: 'all' | 'brain' = args.includes('--scope=brain') ? 'brain' : 'all';
+
+  // v0.41.29.0: explicit `--source <id>` scopes the `orphan_ratio` check to one
+  // source. EXPLICIT-ONLY by design — a raw flag parse, NOT resolveSourceWithTier.
+  // The tier resolver would pick a default source when `--source` is absent and
+  // silently scope a bare `gbrain doctor` to one source; we want bare doctor to
+  // stay brain-wide. Only `orphan_ratio` consumes this for now (other checks
+  // staying brain-wide is a separate, larger change — see TODOS.md).
+  let orphanRatioSourceId: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--source' && i + 1 < args.length) {
+      orphanRatioSourceId = args[++i] || undefined;
+    }
+  }
 
   const checks: Check[] = [];
   let autoFixReport: AutoFixReport | null = null;
@@ -4562,22 +4608,39 @@ export async function buildChecks(
   // show high orphan ratio; not actionable signal).
   // Warn at >0.5; fail at >0.8. Both states recommend
   // `gbrain extract links --by-mention` as the fix.
+  // v0.41.29.0: explicit `--source <id>` scopes this check to one source
+  // (orphanRatioSourceId, parsed at the top of buildChecks). The entity-count
+  // gate + getOrphansData both scope to it; messages name the source. Bare
+  // doctor (no --source) stays brain-wide.
   progress.heartbeat('orphan_ratio');
   try {
     const { getOrphansData } = await import('./orphans.ts');
+    const srcId = orphanRatioSourceId;
+    const inSource = srcId ? ` in source '${srcId}'` : '';
     const entityCount = (await engine.executeRaw<{ count: number }>(
-      "SELECT COUNT(*)::int AS count FROM pages WHERE type IN ('entity', 'person', 'company', 'organization') AND deleted_at IS NULL",
+      `SELECT COUNT(*)::int AS count FROM pages WHERE type IN ('entity', 'person', 'company', 'organization') AND deleted_at IS NULL${srcId ? ' AND source_id = $1' : ''}`,
+      srcId ? [srcId] : [],
     ))[0]?.count ?? 0;
-    if (entityCount < 100) {
+    // Brain-wide (no --source): <100 entities is vacuous — small brains
+    // naturally show a high orphan ratio; not actionable signal. Skip.
+    if (entityCount < 100 && !srcId) {
       checks.push({
         name: 'orphan_ratio',
         status: 'ok',
         message: `Vacuous: ${entityCount} entity pages (<100). Orphan ratio not meaningful at this scale.`,
       });
     } else {
-      const data = await getOrphansData(engine, { includePseudo: false });
+      // F7 (Codex): under EXPLICIT --source, an operator deliberately asked
+      // about one source — answer it even below 100 entities, with a
+      // low-scale caveat, instead of swallowing a real per-source failure
+      // (e.g. 80 fully-orphaned entity pages) behind a vacuous "ok".
+      const data = await getOrphansData(engine, { includePseudo: false, sourceId: srcId });
       const ratio = data.total_linkable > 0 ? data.total_orphans / data.total_linkable : 0;
       const pct = (ratio * 100).toFixed(0);
+      const caveat =
+        entityCount < 100
+          ? ` — low scale (${entityCount} entity pages <100), interpret with caution`
+          : '';
       const hint =
         'Run: gbrain extract links --by-mention   (auto-links entity mentions in body text). ' +
         'Run gbrain orphans for the list.';
@@ -4585,19 +4648,19 @@ export async function buildChecks(
         checks.push({
           name: 'orphan_ratio',
           status: 'fail',
-          message: `Orphan ratio ${pct}% (${data.total_orphans}/${data.total_linkable} linkable pages have no inbound links). ${hint}`,
+          message: `Orphan ratio ${pct}%${inSource} (${data.total_orphans}/${data.total_linkable} linkable pages have no inbound links)${caveat}. ${hint}`,
         });
       } else if (ratio > 0.5) {
         checks.push({
           name: 'orphan_ratio',
           status: 'warn',
-          message: `Orphan ratio ${pct}% (${data.total_orphans}/${data.total_linkable} linkable pages have no inbound links). ${hint}`,
+          message: `Orphan ratio ${pct}%${inSource} (${data.total_orphans}/${data.total_linkable} linkable pages have no inbound links)${caveat}. ${hint}`,
         });
       } else {
         checks.push({
           name: 'orphan_ratio',
           status: 'ok',
-          message: `Orphan ratio ${pct}% (${data.total_orphans}/${data.total_linkable} linkable pages)`,
+          message: `Orphan ratio ${pct}%${inSource} (${data.total_orphans}/${data.total_linkable} linkable pages)${caveat}`,
         });
       }
     }

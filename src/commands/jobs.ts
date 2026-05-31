@@ -1334,9 +1334,14 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
   // throw on partial: a flaky phase must not block every future cycle.
   worker.register('autopilot-cycle', async (job) => {
     const { runCycle } = await import('../core/cycle.ts');
-    const repoPath = typeof job.data.repoPath === 'string'
+    // v0.41.30 (T2): fall back to null (NOT cwd '.') when no repo is configured.
+    // The queued cycle is the same primitive `gbrain dream` uses; a checkout-less
+    // postgres brain should skip filesystem phases (no_brain_dir) and run the
+    // DB-only phases (resolve_symbol_edges, embed, ...) — not silently lint/sync
+    // against whatever directory the worker happens to be running in.
+    const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
-      : (await engine.getConfig('sync.repo_path')) ?? '.';
+      : (await engine.getConfig('sync.repo_path')) ?? null;
 
     // v0.38 (codex r1 P1-2 + P1-5): per-source dispatch threading.
     //   - source_id: when set, runCycle uses the per-source lock ID and
@@ -1525,9 +1530,14 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
   // the single source of truth for phase semantics.
   const makePhaseHandler = (phase: string) => async (job: any) => {
     const { runCycle } = await import('../core/cycle.ts');
-    const repoPath = typeof job.data.repoPath === 'string'
+    // v0.41.38 (codex P2 review): fall back to null (NOT cwd '.') when no repo
+    // is configured, matching the autopilot-cycle handler + `gbrain dream`. On a
+    // checkout-less postgres brain a filesystem phase (synthesize/patterns/...)
+    // skips with reason 'no_brain_dir' instead of running against the worker cwd;
+    // DB-only phases (resolve_symbol_edges/embed/...) ignore brainDir either way.
+    const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
-      : ((await engine.getConfig('sync.repo_path')) ?? '.');
+      : ((await engine.getConfig('sync.repo_path')) ?? null);
     const report = await runCycle(engine, {
       brainDir: repoPath,
       phases: [phase as any],
@@ -1630,10 +1640,6 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     if (!data.target_pack) {
       throw new Error(`unify-types: missing required 'target_pack' parameter`);
     }
-    // Build a minimal OperationContext shim. Real context is constructed
-    // by the CLI/MCP dispatch layer; handlers don't have one, so we build
-    // one with engine + null cfg + remote=false (trusted local caller —
-    // PROTECTED handler enforced at submit_job).
     const ctx = {
       engine,
       cfg: null,
@@ -1641,17 +1647,59 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     } as unknown as import('../core/operations.ts').OperationContext;
     return await runUnifyTypes(ctx, {
       target_pack: data.target_pack,
-      apply: data.apply ?? true,            // worker invocation defaults to apply
+      apply: data.apply ?? true,
       sourceId: data.sourceId,
       onProgress: (msg: string) => {
-        // Stream to job.updateProgress (DB-backed) AND stderr (operator visibility).
         job.updateProgress({ phase: 'unify-types', message: msg }).catch(() => {});
         process.stderr.write(msg + '\n');
       },
     });
   });
 
-  process.stderr.write('[minion worker] brain-health-100 handlers registered (12 ops, 4 protected) + embed-backfill (v0.40) + embed-catch-up (v0.42) + unify-types (v0.42)\n');
+  // v0.42.0.0 SkillOpt Minion handler — for --background CLI invocations.
+  // PROTECTED by name so MCP submission rejects (only trusted CLI can
+  // submit). Threaded SkillOptOpts JSON in job.data.
+  worker.register('skillopt', async (job) => {
+    const { runSkillOpt } = await import('../core/skillopt/orchestrator.ts');
+    const data = (job.data ?? {}) as Record<string, unknown>;
+    const skillsDir = String(data.skills_dir ?? '');
+    const skillName = String(data.skill_name ?? '');
+    const benchmarkPath = String(data.benchmark_path ?? '');
+    if (!skillsDir || !skillName || !benchmarkPath) {
+      throw new Error(`skillopt handler: missing required job.data fields (skills_dir, skill_name, benchmark_path)`);
+    }
+    const result = await runSkillOpt({
+      engine,
+      skillName,
+      skillsDir,
+      benchmarkPath,
+      epochs: Number(data.epochs ?? 4),
+      batchSize: Number(data.batch_size ?? 8),
+      lr: Number(data.lr ?? 4),
+      lrSchedule: (data.lr_schedule as 'cosine' | 'linear' | 'constant') ?? 'cosine',
+      split: (data.split as [number, number, number]) ?? [4, 1, 5],
+      optimizerModel: String(data.optimizer_model ?? 'anthropic:claude-opus-4-7'),
+      targetModel: String(data.target_model ?? 'anthropic:claude-sonnet-4-6'),
+      judgeModel: String(data.judge_model ?? 'anthropic:claude-sonnet-4-6'),
+      mode: (data.mode as 'patch' | 'rewrite') ?? 'patch',
+      dryRun: Boolean(data.dry_run),
+      noMutate: Boolean(data.no_mutate),
+      allowMutateBundled: Boolean(data.allow_mutate_bundled),
+      bootstrapReviewed: Boolean(data.bootstrap_reviewed),
+      json: true,
+      maxCostUsd: Number(data.max_cost_usd ?? 5.0),
+      maxRuntimeMin: Number(data.max_runtime_min ?? 30),
+      force: Boolean(data.force),
+    });
+    return {
+      outcome: result.outcome,
+      receipt: result.receipt,
+      mutated_skill_file: result.mutatedSkillFile,
+      proposed_path: result.proposedPath,
+    };
+  });
+
+  process.stderr.write('[minion worker] brain-health-100 handlers registered (12 ops, 4 protected) + embed-backfill (v0.40) + embed-catch-up (v0.42) + unify-types (v0.42) + skillopt (v0.42.0.0, protected)\n');
 
   // Plugin discovery — one line per discovered plugin (mirrors the
   // openclaw-seam startup line convention from v0.11+). Loaded

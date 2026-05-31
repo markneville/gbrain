@@ -1,5 +1,151 @@
 # TODOS
 
+## v0.41.38.0 dream-postgres / source-pin follow-ups (v0.42+)
+
+Deferred from the v0.41.38.0 wave (code-callers/callees pin + dream-on-postgres).
+Documented tradeoffs, not blockers — the shipped bug fixes are complete and tested.
+
+- [ ] **P1 — Per-source autopilot fan-out passes the global repoPath.**
+  `src/commands/autopilot-fanout.ts:~206` submits every per-source `autopilot-cycle`
+  job with `repoPath: opts.repoPath` (the global checkout), not `src.local_path`.
+  With v0.41.38.0's `cycleSourceId = opts.sourceId ?? resolveSourceForDir(...)`,
+  a per-source job now reconciles DB phases for `src.id` while the filesystem
+  phases (sync/lint/extract) run against the default brain's checkout, then stamps
+  `src.id` fresh — mixed scope. Pre-existing fan-out limitation (cycle.ts PHASE_SCOPE
+  comment already notes genuine per-source fan-out needs deferred work); the common
+  single-source autopilot path (legacy no-source dispatch) is unaffected. Fix:
+  resolve brainDir from the source's `local_path` inside the `autopilot-cycle`
+  handler when `source_id` is set (mirror dream.ts's T1), so FS and DB phases agree.
+  Needs its own review (touches the deferred autopilot path).
+- [ ] **P2 — `.gbrain-source` with invalid SYNTAX still falls through silently.**
+  `readDotfileWalk` (source-resolver.ts:39) intentionally skips a dotfile whose
+  content fails `isValidSourceId` (e.g. `repo_a` with an underscore) per the v0.31.8
+  P1-F silent-fallback design, so `resolveScopedSourceOrThrow` resolves it to a
+  later tier rather than surfacing `invalid_source_pin`. A valid-syntax-but-missing
+  pin DOES surface (assertSourceExists throws). Decide whether a typo'd dotfile
+  should warn loudly; changing it alters resolver semantics shared by other callers.
+- [ ] **P3 — Sibling source-scoped commands don't honor the pin.** `blast`/`flow`/
+  `clusters`/`wiki` still call `resolveDefaultSource` directly. Route them through
+  `resolveScopedSourceOrThrow` for consistency with code-callers/code-callees.
+- [ ] **P3 — `gbrain autopilot` CLI daemon pre-guard.** `autopilot.ts:~152`
+  `if (!repoPath) exit 1` still blocks the daemon on a checkout-less postgres brain.
+  Relax to the same null-brainDir contract so the daemon can run DB phases.
+
+## v0.41.37.0 critical-fix-wave follow-ups (v0.42+)
+
+Filed from the v0.41.37.0 wave (#1621 tag-wipe, #1581 grandfather hang,
+#1605 Windows migration spawn, #1569 sync ReDoS hardening). Each item was
+deliberately scoped out of the wave (see plan + GSTACK REVIEW REPORT at
+`~/.claude/plans/system-instruction-you-are-working-greedy-quiche.md`).
+
+- [ ] **#1621-followup: tag_source provenance column for frontmatter-tag REMOVAL.** The wave shipped ADD-ONLY tag reconciliation (`src/core/import-file.ts`) — re-import never deletes tags, so DB-side enrichment tags survive. Trade-off: removing a tag from a page's frontmatter no longer removes it from the DB. To restore removal-on-edit without wiping enrichment tags, add a `tags.tag_source` column (migration, both engines), stamp `'frontmatter'` on import-path tags, and reconcile by deleting only `tag_source='frontmatter'` tags absent from the new frontmatter (enrichment/backfilled tags default NULL = preserved, so no enrichment-write-site enumeration needed). Priority: P3 (additive-metadata staleness is low-harm).
+
+- [ ] **#1605-followup: convert migration backfill-phase spawns to in-process.** v0.41.37.0 made the 9 schema phases (`gbrain init --migrate-only`) run in-process via `runMigrateOnlyCore`, which unblocks `schema_version` advancement on Windows+bun+Supabase. The remaining non-schema spawns (`extract links/timeline`, `repair-jsonb`) still shell out via `runGbrainSubprocess` — they now surface child stderr (so a Windows failure is diagnosable) but still fail on Windows. Convert them to in-process calls (the extract/repair command functions are callable with an engine) so Windows brains complete data backfill, not just schema. Sites: `src/commands/migrations/v0_12_0.ts` (extract), `v0_12_2.ts` (repair), `v0_13_0.ts` (extract). Priority: P2.
+
+- [ ] **#1569-followup: root-cause the 56K-file sync wedge with the reporter's repro.** v0.41.37.0 shipped ReDoS hardening (input-length cap + star-height lint + `--no-schema-pack` escape) + diagnostics (`GBRAIN_SYNC_TRACE=1` begin-heartbeat + PGLite serve/sync concurrency doc), but did NOT root-cause the deterministic wedge at ~3100 files — the reporter's redos-guard hypothesis didn't hold (it's not on the sync path). Get the reporter's sample files (`/tmp/gbrain-hang-sample.txt`, `/tmp/gbrain-prewedge-sample.txt`), reproduce, and pin the resume-mode deep-recursion pre-import phase (prime suspect: the walk/diff/checkpoint path). Priority: P1 once a repro exists; tracked on the #1569 thread.
+## MCP skillpack distribution — PR2 (v0.41.37+)
+
+Filed from the v0.41.36.0 skill-catalog wave (`list_skills` / `get_skill`).
+PR1 shipped the read-only catalog; PR2 is the download-and-install surface,
+deferred per the plan's D1 + D8 because it stands up new HTTP/binary/token
+infra and reaches into third-party packs that live outside the host skills dir.
+
+- [ ] **v0.41.37+: `build_skillpack` op + `GET /skillpack/download/:token` endpoint.** Build a deterministic `.tgz` on demand (named skillpack, ad-hoc skill subset, or whole repo) and deliver it both base64-inline (universal/stdio) and via an authenticated short-lived download URL when running under `gbrain serve --http`. **What:** new admin-or-write-scoped op + a token-store + cache-dir GC; reuse `packTarball` from `src/core/skillpack/tarball.ts` (already deterministic + symlink-rejecting + size-capped) and the magic-link nonce pattern in `serve-http.ts`. The tarball ships source CODE, so it needs its own trust decision separate from PR1's prose-only catalog. **Why:** lets a thin client install a skillpack into its own setup, not just follow one live. **Depends on:** PR1 (landed in v0.41.36.0). Priority: P2.
+- [ ] **v0.41.37+: `include_skillpacks` merge in `list_skills`.** Fold pinned third-party packs (from `~/.gbrain/skillpack-state.json`) into the catalog. Deferred from PR1 (D8) because packs live OUTSIDE the host skills dir and need (a) a per-pack trusted-root realpath confinement and (b) `{name, skillpack_name?}` disambiguation when a pack skill and a host skill share a name. Lands naturally with PR2's pack machinery. Priority: P2.
+- [ ] **v0.41.37+: TTL+mtime cache for the skill-catalog walk.** PR1 reads fresh every call (cold path, ~ms). If telemetry shows repeated `list_skills` calls, add a TTL+mtime-keyed cache shared by `list_skills` + `get_skill`. Priority: P3 (do-nothing was the deliberate PR1 call).
+- [ ] **v0.41.37+: routing-eval for the `list_skills` instructional envelope + per-skill `tools:` version-skew validation.** The envelope is load-bearing prose with no eval gate yet; and a skill's declared `tools:` aren't validated against the serving gbrain's actual op set for version drift. Priority: P3.
+- [ ] **v0.41.37+: fix malformed `~/.agents/skills/gbrain/.../install/SKILL.md` (missing frontmatter).** Surfaced by codex's own startup error during the v0.41.36.0 plan review — an unrelated stray skill in the agents tree has no `---` frontmatter fence. Not gbrain-repo code; flag/clean separately. Priority: P3.
+## v0.41.34.0 retrieval-cathedral follow-ups (v0.42+)
+
+Deferred from the v0.41.34.0 wave (codex adversarial P1/P2 — documented tradeoffs,
+not blockers; the P0 source-isolation issues were fixed in-wave).
+
+- [ ] **P1 — Calibrate the `evidence` classifier.** `high_vector_match` is assigned
+  from `base_score >= 0.85`, but `base_score` is the pre-boost RRF/keyword/title/alias
+  pipeline score, not a pure cosine. A generic high-scoring page can read as
+  `create_safety='exists'`. Add a true vector-cosine signal (or a `keyword_exact`
+  exact-token check) so the evidence labels are grounded, not inferred from the blend.
+  File: `src/core/search/evidence.ts`. **Why:** the evidence contract is what stops
+  the duplicate-page class; mislabeled evidence weakens it.
+
+- [ ] **P1 — Page-bounded vector pagination.** `searchVector` innerLimit is
+  `offset + max(limit*5, 100)` counted BEFORE `DISTINCT ON`, so on a dense page one
+  page can consume the candidate budget and a deep `OFFSET` can underfill even when
+  more pages exist. Restructure to a two-stage pull (top-N chunks → pool → re-expand)
+  or raise innerLimit adaptively for deep offsets. Files: both engines' `searchVector`.
+  **Why:** deep search pagination on big brains can return short pages.
+
+- [ ] **P2 — Telemetry rolling-deploy gap.** Pre-v111 (mid rolling deploy), rank-1
+  telemetry INSERTs reference missing columns and the write is swallowed, so a window
+  of telemetry is silently lost and `search stats` reads empty on old tables. Either
+  feature-detect the columns before writing the extended INSERT, or accept the gap
+  (documented). File: `src/core/search/telemetry.ts`. **Why:** brief observability
+  blind spot during upgrades.
+
+## v0.41.33.0 adaptive return-sizing follow-ups (v0.42+)
+
+Filed from the v0.41.33.0 wave (intent-aware adaptive return-sizing, born from
+the PrecisionMemBench integration in gbrain-evals). The feature shipped
+default-off; these are the gates and extensions before any default flip.
+
+- [ ] **v0.42+: cross-surface ablation before flipping `search.adaptive_return` default.** The gate ships default-off. Before turning it on in any `MODE_BUNDLES` tier, run the recall ablation (adaptive off vs on, recall-preserving caps) across `gbrain eval longmemeval`, `gbrain eval whoknows`, `gbrain eval suspected-contradictions`, and the BrainBench-Real replay (sibling gbrain-evals repo). Confirm recall@k / answer quality does not regress; pick the safe caps; probably flip `tokenmax` first (broadest searchLimit, most noise). On-surface evidence (the PrecisionMemBench precision/recall frontier: off 0.076/0.99, e1/o2 0.40/0.91, e1/o1 0.58/0.82) is recorded in `gbrain-evals/docs/benchmarks/2026-05-29-precisionmembench.md`. Priority: P2.
+- [ ] **v0.42+: fold adaptive-return params into KNOBS_HASH so adaptive-on calls can cache.** v0.41.33.0 skips `hybridSearchCached` entirely when the gate is on (cache-safe but cache-cold). Fold `adaptive_return` enabled + caps + `minKeep` into `knobsHash()` (append-only, bump `KNOBS_HASH_VERSION`) so a gate-on write segregates from a gate-off row and adaptive calls cache correctly. Required before any default flip (else default-on means cache-cold everywhere). See `src/core/search/mode.ts` KNOBS_HASH parts + `return-policy.ts`. Priority: P2 (paired with the default-flip ablation above).
+- [ ] **v0.42+: gentle adaptive gate on `think`'s gather stage (A3).** The plan's A3 decision was a gentler return-gate on `runThink`'s gather candidates (cleaner context, fewer tokens per reasoning call). Deferred because the benefit is unvalidated without a longmemeval answer-quality run, and trimming the answer path (even default-off) carries regression risk. gather fuses 4 streams (page / takes-keyword / takes-vector / graph); the gate must operate on the fused output with a higher min-keep than search, validated on `gbrain eval longmemeval` answer quality (not retrieval precision). Also: `RunThinkOpts` has no `sourceId` today, so think's gather runs unscoped (codex finding) — scope-isolated think needs that plumbing first. Priority: P2.
+- [ ] **v0.42+: `--explain` human header for adaptive_return.** The decision is in `HybridSearchMeta.adaptive_return` and surfaces in `--json` today. The per-result `explain-formatter.ts` is result-scoped and can't render a per-query meta line; the human `gbrain search --explain` header needs the meta threaded through `cli.ts:formatResult` (it currently only receives `results`). Add a one-line gate-decision header (intent / cap / kept of total). Priority: P3.
+- [ ] **v0.42+: structured-alias / facts-mode fidelity for the PrecisionMemBench eval.** The gbrain-evals benchmark seeds beliefs as pages with aliases in the body (real FTS). A second fidelity that exercises gbrain's structured alias/entity-resolution layer (facts with `valid_until` + entity resolution) would measure gbrain's structured-belief path on the 23 alias cases. Lives in gbrain-evals (`eval/precisionmembench/seed.ts` throws on `fidelity:'structured'` today). Priority: P3.
+
+## v0.41.32.0 content-relative staleness follow-ups (v0.42+)
+
+Filed from the v0.41.32.0 wave (supersedes #1623 — commit-relative sync
+staleness). The wave fixes the LOCAL doctor/sources false-SEVERE and the
+REMOTE surfaces via a durable `sources.newest_content_at` column. Two gaps
+were deliberately scoped out (CM2 + the remote post-sync-divergence residual).
+
+- [ ] **v0.42+: lightweight local content-probe phase to keep `newest_content_at` fresh between syncs.**
+  - **What:** an autopilot/cron phase that, for each git-backed source, runs the
+    cheap `git log -1 --format=%ct` (HEAD committer time) and refreshes
+    `sources.newest_content_at` even when there's nothing to sync.
+  - **Why:** the REMOTE staleness path (`doctorReportRemote`'s `checkSyncFreshness`,
+    `federation_health`, the `get_status_snapshot` MCP op) reads the column and
+    cannot shell out to git (v0.41.27.0 trust boundary). The column is written at
+    sync time, so a commit landed AFTER the last sync is invisible to the remote
+    path until the next sync rewrites it — a narrow false-negative window. The
+    authoritative LOCAL cron doctor catches those (it probes live git), so this is
+    a remote-only freshness improvement, not a correctness hole.
+  - **Pros:** shrinks the remote false-negative window to the probe cadence;
+    keeps the trust boundary intact (probe runs on the trusted host, not from a
+    remote caller).
+  - **Cons:** a new background phase + its own tests + a cadence knob; only
+    matters for operators who rely on `gbrain remote doctor` instead of the local
+    cron doctor.
+  - **Context:** the helper already exists — `newestCommitMs(localPath)` in
+    `src/core/source-health.ts`. The phase just calls it per source and UPDATEs
+    the column. See the v0.41.32.0 plan at
+    `~/.claude/plans/system-instruction-you-are-working-vivid-gizmo.md`.
+  - **Also note:** `checkCycleFreshness` was deliberately left on wall-clock in
+    v0.41.32.0 (CM2 — it compares `last_full_cycle_at` via `listAllSources`, a
+    different axis from sync staleness). Content-relativizing it (a source whose
+    newest commit predates its last full cycle doesn't need re-cycling) is a
+    natural companion to this probe phase. Priority: P3.
+
+## brainstorm/lsd --save source-awareness (v0.42+)
+
+Filed from the `--save` dual-sink hardening wave (route through the canonical
+ingestion path: `importFromContent({noEmbed:true})` + the shared
+`writePageThrough` helper extracted from `put_page`).
+
+- [ ] **v0.42+: make `gbrain brainstorm/lsd --save` source-aware.** Today the save path always writes to `source='default'` — `persistSavedIdea` (`src/commands/brainstorm.ts`) hardcodes `sourceId ?? 'default'`, and there is no `--save`-side `--source` flag. Both sinks stay consistent at default (no live bug), but on a multi-source brain a generated idea can't be filed to a non-default source. **What:** add a `--source <id>` option to brainstorm/lsd, resolve it via `resolveSourceWithTier`, and thread `sourceId` into `persistSavedIdea` → `importFromContent({sourceId})` + `writePageThrough({sourceId})`. **Why:** complete the multi-source story for generated ideas; the disk layout already handles it. **Context:** `writePageThrough` and `resolvePageFilePath` already take `sourceId` and emit `.sources/<id>/<slug>.md` for non-default sources, and `importFromContent` already accepts `sourceId` — so the only missing piece is the CLI flag + threading. `runBrainstorm` (orchestrator) already accepts `sourceId` for the close/far READ side. **Depends on:** nothing; purely additive. Priority: P3 (default-source is the common case).
+
+## v0.41.29.0 orphan source-scoping follow-ups (v0.42+)
+
+Filed from the v0.41.29.0 wave (bold-name-no-time pattern + orphan_ratio
+source scoping). The Codex outside-voice review (F8) flagged two surfaces
+the wave deliberately scoped out.
+
+- [ ] **v0.42+: thin-client `gbrain doctor --source` orphan_ratio scoping.** v0.41.29.0 scopes `orphan_ratio` to `--source` on the LOCAL doctor path (`buildChecks` in `src/commands/doctor.ts`) and closes the `find_orphans` MCP read leak via `sourceScopeOpts(ctx)`. The thin-client / remote doctor path (`src/core/doctor-remote.ts` `runRemoteDoctor`) is a separate code path that does not thread `--source`, so `gbrain doctor --source x` against a remote `gbrain serve --http` brain still reports brain-wide orphan_ratio. Thread the explicit `--source` into the remote doctor request + have the server-side check honor it. Priority: P3 (most users run doctor locally).
+
+- [ ] **v0.42+: widen `check-test-real-names.sh` BANNED_NAMES to catch real-name reintroduction in tests + src.** v0.41.29.0 scrubbed pre-existing real names (`Garry Tan`, `Alex Graveley`) from `bold-paren-time`'s `test_positive` (and the new `bold-name-no-time` samples), but no automated guard caught them: `check-test-real-names.sh` only scans `test/**` and its BANNED_NAMES list doesn't include `garry tan`; `check-fixture-privacy.sh` only scans `test/fixtures/conversation-formats/`. Add `garry tan` / `garrytan` (and consider extending the scan to `src/core/conversation-parser/builtins.ts` test samples) so future reintroductions fail CI. Priority: P3 (hardening).
+
 ## v0.41.28.0 #1570 instrument-then-fix follow-ups (v0.41.28+ / v0.42+)
 
 Filed from the v0.41.28.0 plan-eng-review after the codex outside-voice
