@@ -21,7 +21,7 @@
  *     rotation (via configureGateway()) invalidates stale entries.
  */
 
-import { embed as aiEmbed, embedMany, generateObject, generateText } from 'ai';
+import { embed as aiEmbed, embedMany, generateObject, generateText, jsonSchema, tool } from 'ai';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { listRecipes } from './recipes/index.ts';
 import { createOpenAI } from '@ai-sdk/openai';
@@ -2175,6 +2175,55 @@ export interface ChatToolDef {
   inputSchema: Record<string, unknown>;
 }
 
+export function buildAiSdkToolSetForChat(defs: ChatToolDef[] | undefined): Record<string, any> | undefined {
+  if (!defs || defs.length === 0) return undefined;
+  return defs.reduce((acc, t) => {
+    acc[t.name] = tool({
+      description: t.description,
+      inputSchema: jsonSchema(t.inputSchema as any),
+    }) as any;
+    return acc;
+  }, {} as Record<string, any>);
+}
+
+export function normalizeMessagesForAiSdk(messages: ChatMessage[]): any[] {
+  return messages.map((m) => {
+    if (!Array.isArray(m.content)) return m;
+    const toolResults = m.content.filter(
+      (b): b is Extract<ChatBlock, { type: 'tool-result' }> => b.type === 'tool-result',
+    );
+    if (toolResults.length === 0) return m;
+    return {
+      ...m,
+      role: 'tool' as const,
+      content: toolResults.map((b) => ({
+        type: 'tool-result' as const,
+        toolCallId: b.toolCallId,
+        toolName: b.toolName,
+        output: toAiSdkToolOutput(b.output, b.isError === true),
+      })),
+    };
+  });
+}
+
+function toAiSdkToolOutput(output: unknown, isError: boolean): { type: string; value?: unknown; reason?: string } {
+  if (isError) {
+    if (typeof output === 'string') return { type: 'error-text', value: output };
+    return { type: 'error-json', value: toJsonValue(output) };
+  }
+  if (typeof output === 'string') return { type: 'text', value: output };
+  return { type: 'json', value: toJsonValue(output) };
+}
+
+function toJsonValue(value: unknown): unknown {
+  if (value === undefined) return null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return String(value);
+  }
+}
+
 export interface ChatResult {
   /** Final text content concatenated from text blocks. */
   text: string;
@@ -2454,13 +2503,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   // Build messages. Anthropic prompt-cache markers ride on system + last tool
   // via providerOptions; the AI SDK accepts the system as a string for
   // generateText, so cache markers go through providerOptions.anthropic.
-  const tools = (opts.tools ?? []).reduce((acc, t) => {
-    acc[t.name] = {
-      description: t.description,
-      inputSchema: { jsonSchema: t.inputSchema } as any,
-    };
-    return acc;
-  }, {} as Record<string, any>);
+  const tools = buildAiSdkToolSetForChat(opts.tools) ?? {};
 
   const providerOptions: Record<string, any> = {};
   if (useCache) {
@@ -2487,7 +2530,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     const result = await generateText({
       model,
       system: opts.system,
-      messages: opts.messages as any,
+      messages: normalizeMessagesForAiSdk(opts.messages) as any,
       tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
       maxOutputTokens: opts.maxTokens ?? 4096,
       abortSignal: opts.abortSignal,
@@ -2864,7 +2907,7 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
     // Feed all tool results back as a single user message.
     const userMessageIdx = messageIdx++;
     void userMessageIdx;
-    messages.push({ role: 'user', content: toolResultBlocks });
+    messages.push({ role: 'tool', content: toolResultBlocks });
 
     turnIdx++;
   }

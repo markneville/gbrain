@@ -23,6 +23,8 @@ import {
   isAvailable,
   getChatModel,
   getChatFallbackChain,
+  buildAiSdkToolSetForChat,
+  normalizeMessagesForAiSdk,
 } from '../../src/core/ai/gateway.ts';
 import { parseModelId, resolveRecipe, assertTouchpoint } from '../../src/core/ai/model-resolver.ts';
 import { AIConfigError } from '../../src/core/ai/errors.ts';
@@ -191,6 +193,72 @@ describe('chat touchpoint — config alias resolution', () => {
       env: { ANTHROPIC_API_KEY: 'fake' },
     });
     expect(isAvailable('chat')).toBe(true);
+  });
+});
+
+describe('chat touchpoint — AI SDK v6 adapter regressions', () => {
+  test('tool defs are wrapped as AI SDK Schema objects, not raw JSON schema objects', async () => {
+    const tools = buildAiSdkToolSetForChat([
+      {
+        name: 'search',
+        description: 'search the brain',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string' } },
+          required: ['query'],
+        },
+      },
+    ])!;
+
+    expect(tools.search.description).toBe('search the brain');
+    expect(typeof tools.search.inputSchema).toBe('object');
+    // AI SDK v6 expects a Schema object with a jsonSchema getter. Passing the
+    // raw object, or { jsonSchema: raw }, throws "schema is not a function" at runtime.
+    expect(await tools.search.inputSchema.jsonSchema).toEqual({
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+    });
+  });
+
+  test('tool-result messages are normalized to role=tool with typed outputs', () => {
+    const messages = normalizeMessagesForAiSdk([
+      {
+        role: 'user',
+        content: [
+          { type: 'tool-result', toolCallId: 'call-1', toolName: 'search', output: { ok: true } },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [
+          { type: 'tool-result', toolCallId: 'call-2', toolName: 'get_page', output: 'not found', isError: true },
+        ],
+      },
+    ] as any);
+
+    expect(messages[0]).toEqual({
+      role: 'tool',
+      content: [
+        {
+          type: 'tool-result',
+          toolCallId: 'call-1',
+          toolName: 'search',
+          output: { type: 'json', value: { ok: true } },
+        },
+      ],
+    });
+    expect(messages[1]).toEqual({
+      role: 'tool',
+      content: [
+        {
+          type: 'tool-result',
+          toolCallId: 'call-2',
+          toolName: 'get_page',
+          output: { type: 'error-text', value: 'not found' },
+        },
+      ],
+    });
   });
 });
 
